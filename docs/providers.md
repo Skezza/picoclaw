@@ -289,6 +289,45 @@ Configure multiple endpoints for the same model name—PicoClaw will automatical
 }
 ```
 
+#### Automatic Model Failover (Cascade)
+
+PicoClaw already supports automatic failover when you configure `primary` + `fallbacks` in the agent model settings.
+The runtime fallback chain retries the next candidate for retriable failures such as HTTP `429`, quota/rate-limit errors, and timeout errors.
+It also applies cooldown tracking per candidate to avoid immediately retrying a recently failed target.
+
+```json
+{
+  "model_list": [
+    {
+      "model_name": "qwen-main",
+      "model": "openai/qwen3.5:cloud",
+      "api_base": "https://api.example.com/v1",
+      "api_key": "sk-main"
+    },
+    {
+      "model_name": "deepseek-backup",
+      "model": "deepseek/deepseek-chat",
+      "api_key": "sk-backup-1"
+    },
+    {
+      "model_name": "gemini-backup",
+      "model": "gemini/gemini-2.5-flash",
+      "api_key": "sk-backup-2"
+    }
+  ],
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "qwen-main",
+        "fallbacks": ["deepseek-backup", "gemini-backup"]
+      }
+    }
+  }
+}
+```
+
+If you use key-level failover for the same model, PicoClaw can chain through additional key-backed candidates before moving to cross-model backups.
+
 #### Migration from Legacy `providers` Config
 
 The old `providers` configuration is **deprecated** but still supported for backward compatibility.

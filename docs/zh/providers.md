@@ -259,6 +259,45 @@ PicoClaw 在发送请求前仅去除外层 `litellm/` 前缀，因此 `litellm/l
 }
 ```
 
+#### 自动模型失败切换（Cascade）
+
+当你在 Agent 的模型设置里配置 `primary` + `fallbacks` 时，PicoClaw 已经支持自动失败切换。
+运行时 fallback 链会在可重试错误时切到下一个候选（例如 HTTP `429`、配额/限流错误、超时错误）。
+同时会对每个候选应用 cooldown，避免对刚失败的目标立即重试。
+
+```json
+{
+  "model_list": [
+    {
+      "model_name": "qwen-main",
+      "model": "openai/qwen3.5:cloud",
+      "api_base": "https://api.example.com/v1",
+      "api_key": "sk-main"
+    },
+    {
+      "model_name": "deepseek-backup",
+      "model": "deepseek/deepseek-chat",
+      "api_key": "sk-backup-1"
+    },
+    {
+      "model_name": "gemini-backup",
+      "model": "gemini/gemini-2.5-flash",
+      "api_key": "sk-backup-2"
+    }
+  ],
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "qwen-main",
+        "fallbacks": ["deepseek-backup", "gemini-backup"]
+      }
+    }
+  }
+}
+```
+
+如果你在同一模型上启用了 key 级失败切换，PicoClaw 会先在该模型的多 key 候选间切换，再继续切到跨模型备选。
+
 #### 从旧的 `providers` 配置迁移
 
 旧的 `providers` 配置格式**已弃用**，但为向后兼容仍支持。
