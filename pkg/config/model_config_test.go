@@ -310,13 +310,11 @@ func TestConfig_ValidateRouting(t *testing.T) {
 				Agents: AgentsConfig{
 					Defaults: AgentDefaults{
 						Routing: &RoutingConfig{
-							FreeTier: "free",
 							PaidTier: "heavy",
 							Tiers: []RoutingTierConfig{
 								{Name: "fast", Model: &AgentModelConfig{Primary: "gpt-5.4-nano"}},
 								{Name: "tools", Model: &AgentModelConfig{Primary: "gpt-5.4-mini"}},
 								{Name: "heavy", Model: &AgentModelConfig{Primary: "gpt-5-mini"}},
-								{Name: "free", MaxScore: -1, Model: &AgentModelConfig{Primary: "openrouter-free"}},
 							},
 						},
 					},
@@ -353,23 +351,6 @@ func TestConfig_ValidateRouting(t *testing.T) {
 			},
 			wantErr: true,
 			errMsg:  "model.primary is required",
-		},
-		{
-			name: "unknown free tier reference",
-			config: &Config{
-				Agents: AgentsConfig{
-					Defaults: AgentDefaults{
-						Routing: &RoutingConfig{
-							FreeTier: "free",
-							Tiers: []RoutingTierConfig{
-								{Name: "fast", Model: &AgentModelConfig{Primary: "a"}},
-							},
-						},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "unknown tier",
 		},
 	}
 

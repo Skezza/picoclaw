@@ -42,7 +42,6 @@ const (
 	DefaultFastTierName  = "fast"
 	DefaultHeavyTierName = "heavy"
 	DefaultToolsTierName = "tools"
-	DefaultFreeTierName  = "free"
 )
 
 // New creates a Router with the given config and the default RuleClassifier.

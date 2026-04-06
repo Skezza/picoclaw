@@ -2557,13 +2557,11 @@ func TestProcessMessage_TieredRoutingUsesToolsTierForRepoPrompt(t *testing.T) {
 				MaxToolIterations: 10,
 				Routing: &config.RoutingConfig{
 					Enabled:  true,
-					FreeTier: "free",
 					PaidTier: "heavy",
 					Tiers: []config.RoutingTierConfig{
 						{Name: "fast", MaxScore: 0.20, Model: &config.AgentModelConfig{Primary: "gpt-5.4-nano"}},
 						{Name: "tools", MaxScore: 0, Model: &config.AgentModelConfig{Primary: "gpt-5.4-mini"}},
 						{Name: "heavy", MaxScore: 0, Model: &config.AgentModelConfig{Primary: "gpt-5-mini"}},
-						{Name: "free", MaxScore: -1, Model: &config.AgentModelConfig{Primary: "openrouter-free"}},
 					},
 				},
 			},
@@ -2572,7 +2570,6 @@ func TestProcessMessage_TieredRoutingUsesToolsTierForRepoPrompt(t *testing.T) {
 			{ModelName: "gpt-5.4-nano", Model: "openai/gpt-5.4-nano", APIBase: fastServer.URL, APIKeys: config.SimpleSecureStrings("fast-key")},
 			{ModelName: "gpt-5.4-mini", Model: "openai/gpt-5.4-mini", APIBase: toolsServer.URL, APIKeys: config.SimpleSecureStrings("tools-key")},
 			{ModelName: "gpt-5-mini", Model: "openai/gpt-5-mini", APIBase: heavyServer.URL, APIKeys: config.SimpleSecureStrings("heavy-key")},
-			{ModelName: "openrouter-free", Model: "openrouter/openai/gpt-oss-20b:free", APIBase: "https://openrouter.ai/api/v1", APIKeys: config.SimpleSecureStrings("free-key")},
 		},
 	}
 

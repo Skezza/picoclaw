@@ -227,11 +227,6 @@ func NewAgentInstance(
 		if legacyLight := routeTiers["light"]; legacyLight != nil {
 			lightCandidates = legacyLight.Candidates
 			lightProvider = legacyLight.Provider
-		} else if freeTier := strings.TrimSpace(defaults.Routing.FreeTier); freeTier != "" {
-			if resolved := routeTiers[freeTier]; resolved != nil {
-				lightCandidates = resolved.Candidates
-				lightProvider = resolved.Provider
-			}
 		}
 	}
 

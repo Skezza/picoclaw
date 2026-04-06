@@ -215,14 +215,13 @@ type RoutingTierConfig struct {
 // When enabled, each incoming message is scored against structural features
 // (message length, code blocks, tool call history, conversation depth, attachments).
 // Legacy configs can continue to use LightModel/Threshold; newer configs can
-// define named tiers with their own model chains and use FreeTier/PaidTier
+// define named tiers with their own model chains and use PaidTier
 // for the session mode commands.
 type RoutingConfig struct {
 	Enabled    bool                `json:"enabled"`
 	LightModel string              `json:"light_model,omitempty"` // legacy: model_name from model_list to use for simple tasks
 	Threshold  float64             `json:"threshold,omitempty"`   // legacy: complexity score in [0,1]; score >= threshold → primary model
 	Tiers      []RoutingTierConfig `json:"tiers,omitempty"`
-	FreeTier   string              `json:"free_tier,omitempty"`
 	PaidTier   string              `json:"paid_tier,omitempty"`
 }
 
@@ -1296,9 +1295,6 @@ func (c *Config) ValidateRouting() error {
 		return nil
 	}
 
-	if err := validateTierRef("free_tier", rc.FreeTier); err != nil {
-		return err
-	}
 	if err := validateTierRef("paid_tier", rc.PaidTier); err != nil {
 		return err
 	}

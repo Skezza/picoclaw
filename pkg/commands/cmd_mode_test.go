@@ -236,7 +236,7 @@ func TestStatusCommand_ReportsPendingBoost(t *testing.T) {
 		return "gpt-5.4-mini", "openai"
 	}
 	rt.GetSessionModelMode = func() (string, string) {
-		return "tier:free", "tier:heavy"
+		return "tier:tools", "tier:heavy"
 	}
 	rt.GetSessionWorkMode = func() string { return "code" }
 

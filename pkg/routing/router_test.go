@@ -402,14 +402,14 @@ func TestRouter_LightModel(t *testing.T) {
 func TestRouter_SelectTier_UsesFirstMatchingTier(t *testing.T) {
 	r := New(RouterConfig{
 		Tiers: []config.RoutingTierConfig{
-			{Name: "free", MaxScore: 0.2},
+			{Name: "fast", MaxScore: 0.2},
 			{Name: "balanced", MaxScore: 1.0},
 		},
 	})
 
 	tier, _ := r.SelectTier("hi", nil)
-	if tier != "free" {
-		t.Fatalf("tier=%q, want %q", tier, "free")
+	if tier != "fast" {
+		t.Fatalf("tier=%q, want %q", tier, "fast")
 	}
 
 	complex := "```go\nfmt.Println(\"x\")\n```\nPlease refactor this with tests."
@@ -454,7 +454,7 @@ func TestRouter_SelectTier_RecentToolCallsPreferToolsTier(t *testing.T) {
 func TestRouter_SelectTier_SkipsManualOnlyTiers(t *testing.T) {
 	r := New(RouterConfig{
 		Tiers: []config.RoutingTierConfig{
-			{Name: "free", MaxScore: -1},
+			{Name: "manual", MaxScore: -1},
 			{Name: "fast", MaxScore: 0.3},
 		},
 	})

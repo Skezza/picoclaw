@@ -311,9 +311,6 @@ func TestDefaultConfig_TieredRoutingHydrated(t *testing.T) {
 	if !rt.Enabled {
 		t.Fatal("DefaultConfig().Agents.Defaults.Routing.Enabled should be true")
 	}
-	if rt.FreeTier != "" {
-		t.Fatalf("DefaultConfig().Agents.Defaults.Routing.FreeTier = %q, want empty", rt.FreeTier)
-	}
 	if rt.PaidTier != "heavy" {
 		t.Fatalf("DefaultConfig().Agents.Defaults.Routing.PaidTier = %q, want %q", rt.PaidTier, "heavy")
 	}
