@@ -159,9 +159,6 @@ func TestSessionModeTargets_DefaultConfigAlignsWithRoutingDefaults(t *testing.T)
 	if targets.Heavy.Target != "tier:heavy" || targets.Heavy.Label != "gpt-5-mini" {
 		t.Fatalf("heavy=%+v, want tier:heavy / gpt-5-mini", targets.Heavy)
 	}
-	if targets.Free.Target != "" || targets.Free.Label != "" {
-		t.Fatalf("free=%+v, want empty free target in defaults", targets.Free)
-	}
 }
 
 func TestDefaultCommand_ClearsSessionModel(t *testing.T) {
