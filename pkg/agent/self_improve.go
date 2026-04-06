@@ -293,18 +293,25 @@ func validateSelfImproveWorktree(worktree string) error {
 		return err
 	}
 
+	goBin, err := resolveSelfImproveBinary("go")
+	if err != nil {
+		return err
+	}
+	baseEnv := selfImproveCommandEnv()
+
 	steps := [][]string{
-		{"go", "test", "./pkg/agent", "./pkg/config", "./pkg/tools"},
-		{"make", "build"},
-		{"go", "build", "-tags", "goolm,stdjson", "-o", filepath.Join(tmpDir, "picoclaw-launcher"), "./web/backend"},
+		{goBin, "test", "./pkg/agent", "./pkg/config", "./pkg/tools"},
+		{goBin, "generate", "./..."},
+		{goBin, "build", "-v", "-tags", "goolm,stdjson", "-o", filepath.Join(tmpDir, "picoclaw"), "./cmd/picoclaw"},
+		{goBin, "build", "-v", "-tags", "goolm,stdjson", "-o", filepath.Join(tmpDir, "picoclaw-launcher"), "./web/backend"},
 	}
 	if dirExists(filepath.Join(worktree, "cmd", "picoclaw-mcp-fs")) {
-		steps = append(steps, []string{"go", "build", "-tags", "goolm,stdjson", "-o", filepath.Join(tmpDir, "picoclaw-mcp-fs"), "./cmd/picoclaw-mcp-fs"})
+		steps = append(steps, []string{goBin, "build", "-v", "-tags", "goolm,stdjson", "-o", filepath.Join(tmpDir, "picoclaw-mcp-fs"), "./cmd/picoclaw-mcp-fs"})
 	}
 	for _, step := range steps {
 		cmd := exec.CommandContext(ctx, step[0], step[1:]...)
 		cmd.Dir = worktree
-		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+		cmd.Env = append(baseEnv, "GIT_TERMINAL_PROMPT=0", "CGO_ENABLED=0")
 		if output, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("%s failed: %w: %s", strings.Join(step, " "), err, strings.TrimSpace(string(output)))
 		}
@@ -315,6 +322,48 @@ func validateSelfImproveWorktree(worktree string) error {
 func dirExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
+}
+
+func resolveSelfImproveBinary(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", fmt.Errorf("binary name is required")
+	}
+	if path, err := exec.LookPath(name); err == nil && strings.TrimSpace(path) != "" {
+		return path, nil
+	}
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		candidate := filepath.Join(home, ".local", "bin", name)
+		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("%s binary not found in PATH or ~/.local/bin", name)
+}
+
+func selfImproveCommandEnv() []string {
+	env := append([]string(nil), os.Environ()...)
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		localBin := filepath.Join(home, ".local", "bin")
+		hasPath := false
+		for i, entry := range env {
+			if !strings.HasPrefix(entry, "PATH=") {
+				continue
+			}
+			hasPath = true
+			current := strings.TrimPrefix(entry, "PATH=")
+			if current == "" {
+				env[i] = "PATH=" + localBin
+			} else if !strings.Contains(current, localBin) {
+				env[i] = "PATH=" + localBin + string(os.PathListSeparator) + current
+			}
+			break
+		}
+		if !hasPath {
+			env = append(env, "PATH="+localBin)
+		}
+	}
+	return env
 }
 
 func gitOutput(dir string, args ...string) (string, error) {
