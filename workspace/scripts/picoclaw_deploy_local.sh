@@ -3,6 +3,7 @@ set -euo pipefail
 
 PICO_HOME="${PICOCLAW_HOME:-/mnt/1tb/picoclaw-home}"
 WORK_ROOT="${WORK_ROOT:-$PICO_HOME/workspace}"
+ENV_FILE="${ENV_FILE:-$PICO_HOME/picoclaw.env}"
 LEGACY_SRC_DIR="${LEGACY_SRC_DIR:-/home/joe/agent/picoclaw-checkout}"
 SRC_DIR="${SRC_DIR:-$WORK_ROOT/src/agent/picoclaw-checkout}"
 INSTALL_DIR="${INSTALL_DIR:-/home/joe/.local/lib/picoclaw/v0.2.5}"
@@ -18,6 +19,13 @@ SMOKE_DIR="$WORK_ROOT/.tmp/deploy-smoke"
 
 if [[ ! -d "$SRC_DIR" && -d "$LEGACY_SRC_DIR" ]]; then
   SRC_DIR="$LEGACY_SRC_DIR"
+fi
+
+if [[ -f "$ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
 fi
 
 export PATH="$GO_HOME/bin:$BIN_DIR:/home/joe/.npm-global/bin:$PATH"
@@ -82,7 +90,7 @@ fi
 echo "[5/5] Smoke checks"
 PICOCLAW_HOME="$PICO_HOME" "$BIN_DIR/picoclaw" agent -m '/codex projects' --session "cli:deploy-smoke:$ts" \
   >"$SMOKE_DIR/picoclaw-deploy-smoke.out" 2>"$SMOKE_DIR/picoclaw-deploy-smoke.err" || true
-if ! grep -q "Codex sessions:\|No codex sessions yet" "$SMOKE_DIR/picoclaw-deploy-smoke.out"; then
+if ! grep -q "Codex sessions:\|No codex sessions yet\|No codex projects yet" "$SMOKE_DIR/picoclaw-deploy-smoke.out"; then
   echo "warning: /codex smoke output was unexpected" >&2
   sed -n '1,80p' "$SMOKE_DIR/picoclaw-deploy-smoke.out" >&2 || true
   sed -n '1,80p' "$SMOKE_DIR/picoclaw-deploy-smoke.err" >&2 || true
