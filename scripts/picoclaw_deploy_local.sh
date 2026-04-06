@@ -10,6 +10,15 @@ INSTALL_ROOT="${INSTALL_ROOT:-$HOME/.local/lib/picoclaw}"
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
 PICOCLAW_HOME="${PICOCLAW_HOME:-$HOME/.picoclaw}"
 RELEASES_ROOT="${RELEASES_ROOT:-$PICOCLAW_HOME/releases}"
+GO_BIN="${GO_BIN:-}"
+
+if [[ -z "$GO_BIN" ]]; then
+  if command -v go >/dev/null 2>&1; then
+    GO_BIN="$(command -v go)"
+  elif [[ -x "$HOME/.local/bin/go" ]]; then
+    GO_BIN="$HOME/.local/bin/go"
+  fi
+fi
 
 if [[ -z "$SRC_DIR" ]]; then
   echo "SRC_DIR is required" >&2
@@ -19,8 +28,13 @@ if [[ ! -d "$SRC_DIR" ]]; then
   echo "SRC_DIR does not exist: $SRC_DIR" >&2
   exit 1
 fi
+if [[ -z "$GO_BIN" || ! -x "$GO_BIN" ]]; then
+  echo "go binary not found; set GO_BIN or install go in PATH/~/.local/bin" >&2
+  exit 1
+fi
 
 mkdir -p "$INSTALL_ROOT" "$BIN_DIR" "$RELEASES_ROOT"
+export PATH="$HOME/.local/bin:${PATH:-}"
 
 sha="$(git -C "$SRC_DIR" rev-parse --short=12 HEAD)"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -36,11 +50,11 @@ rm -rf "$tmp_dir"
 mkdir -p "$tmp_dir"
 
 echo "Building PicoClaw release into $tmp_dir"
-make -C "$SRC_DIR" build
-cp "$SRC_DIR/build/picoclaw" "$tmp_dir/picoclaw"
-go -C "$SRC_DIR" build -tags goolm,stdjson -o "$tmp_dir/picoclaw-launcher" ./web/backend
+"$GO_BIN" -C "$SRC_DIR" generate ./...
+CGO_ENABLED=0 "$GO_BIN" -C "$SRC_DIR" build -v -tags goolm,stdjson -o "$tmp_dir/picoclaw" ./cmd/picoclaw
+CGO_ENABLED=0 "$GO_BIN" -C "$SRC_DIR" build -v -tags goolm,stdjson -o "$tmp_dir/picoclaw-launcher" ./web/backend
 if [[ -d "$SRC_DIR/cmd/picoclaw-mcp-fs" ]]; then
-  go -C "$SRC_DIR" build -tags goolm,stdjson -o "$tmp_dir/picoclaw-mcp-fs" ./cmd/picoclaw-mcp-fs
+  CGO_ENABLED=0 "$GO_BIN" -C "$SRC_DIR" build -v -tags goolm,stdjson -o "$tmp_dir/picoclaw-mcp-fs" ./cmd/picoclaw-mcp-fs
 fi
 
 mv "$tmp_dir" "$release_dir"
