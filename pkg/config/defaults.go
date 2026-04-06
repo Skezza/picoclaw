@@ -22,8 +22,8 @@ func DefaultConfig() *Config {
 				Workspace:                 workspacePath,
 				RestrictToWorkspace:       true,
 				Provider:                  "",
-				ModelName:                 "gpt-5-mini",
-				ModelFallbacks:            []string{"gpt-5.4-mini"},
+				ModelName:                 "gpt-5.4-mini",
+				ModelFallbacks:            []string{"gpt-5-mini"},
 				MaxTokens:                 32768,
 				Temperature:               nil, // nil means use provider default
 				MaxToolIterations:         50,
@@ -270,17 +270,6 @@ func DefaultConfig() *Config {
 				APIBase:   "https://api.groq.com/openai/v1",
 			},
 
-			// OpenRouter (100+ models) - https://openrouter.ai/keys
-			{
-				ModelName: "openrouter-auto",
-				Model:     "openrouter/auto",
-				APIBase:   "https://openrouter.ai/api/v1",
-			},
-			{
-				ModelName: "openrouter-gpt-5.4",
-				Model:     "openrouter/openai/gpt-5.4",
-				APIBase:   "https://openrouter.ai/api/v1",
-			},
 			// NVIDIA - https://build.nvidia.com/
 			{
 				ModelName: "nemotron-4-340b",

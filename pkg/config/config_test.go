@@ -297,11 +297,11 @@ func TestDefaultConfig_MaxToolIterations(t *testing.T) {
 func TestDefaultConfig_TieredRoutingHydrated(t *testing.T) {
 	cfg := DefaultConfig()
 
-	if cfg.Agents.Defaults.ModelName != "gpt-5-mini" {
-		t.Fatalf("DefaultConfig().Agents.Defaults.ModelName = %q, want %q", cfg.Agents.Defaults.ModelName, "gpt-5-mini")
+	if cfg.Agents.Defaults.ModelName != "gpt-5.4-mini" {
+		t.Fatalf("DefaultConfig().Agents.Defaults.ModelName = %q, want %q", cfg.Agents.Defaults.ModelName, "gpt-5.4-mini")
 	}
-	if got := cfg.Agents.Defaults.ModelFallbacks; len(got) != 1 || got[0] != "gpt-5.4-mini" {
-		t.Fatalf("DefaultConfig().Agents.Defaults.ModelFallbacks = %v, want [gpt-5.4-mini]", got)
+	if got := cfg.Agents.Defaults.ModelFallbacks; len(got) != 1 || got[0] != "gpt-5-mini" {
+		t.Fatalf("DefaultConfig().Agents.Defaults.ModelFallbacks = %v, want [gpt-5-mini]", got)
 	}
 
 	rt := cfg.Agents.Defaults.Routing
@@ -497,7 +497,7 @@ func TestSaveConfig_IncludesHydratedDefaultModelField(t *testing.T) {
 		t.Fatalf("ReadFile failed: %v", err)
 	}
 
-	if !strings.Contains(string(data), `"model_name": "gpt-5-mini"`) {
+	if !strings.Contains(string(data), `"model_name": "gpt-5.4-mini"`) {
 		t.Fatalf("saved config should include hydrated default model_name, got: %s", string(data))
 	}
 }
