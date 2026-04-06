@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -11,9 +12,9 @@ import (
 // Six entries covers roughly one full tool-use round-trip (user → assistant+tool_call → tool_result → assistant).
 const lookbackWindow = 6
 
-// Features holds the structural signals extracted from a message and its session context.
-// Every dimension is language-agnostic by construction — no keyword or pattern matching
-// against natural-language content. This ensures consistent routing for all locales.
+// Features holds the signals extracted from a message and its session context.
+// Most dimensions are structural; ToolIntent adds a narrow set of repo/tool cues
+// so routing can leave nano early for likely agentic turns.
 type Features struct {
 	// TokenEstimate is a proxy for token count.
 	// CJK runes count as 1 token each; non-CJK runes as 0.25 tokens each.
@@ -35,7 +36,24 @@ type Features struct {
 	// HasAttachments is true when the message appears to contain media (images,
 	// audio, video). Multi-modal inputs require vision-capable heavy models.
 	HasAttachments bool
+
+	// ToolIntent is true when the prompt strongly suggests repo/tool activity
+	// before any tool calls have happened in this session.
+	ToolIntent bool
 }
+
+var (
+	pathLikePattern = regexp.MustCompile(`(?i)(?:\./|\.\./|/|(?:^|\s)(?:src|pkg|cmd|internal|test|tests|apps?)/)[^\s]*`)
+	fileExtPattern  = regexp.MustCompile(`(?i)\.(go|ts|tsx|js|jsx|py|rs|java|json|ya?ml|toml|sh|sql|md)\b`)
+	actionCues      = []string{
+		"fix", "edit", "change", "patch", "refactor", "implement", "rename", "remove", "add",
+		"run", "test", "build", "debug", "grep", "search", "inspect",
+	}
+	commandCues = []string{
+		"git ", "go ", "npm ", "pnpm ", "yarn ", "cargo ", "pytest", "python ", "uv ", "bash ", "sh ", "make ", "docker ", "kubectl ",
+		"$ ", "> ",
+	}
+)
 
 // ExtractFeatures computes the structural feature vector for a message.
 // It is a pure function with no side effects and zero allocations beyond
@@ -47,6 +65,7 @@ func ExtractFeatures(msg string, history []providers.Message) Features {
 		RecentToolCalls:   countRecentToolCalls(history),
 		ConversationDepth: len(history),
 		HasAttachments:    hasAttachments(msg),
+		ToolIntent:        hasToolIntent(msg),
 	}
 }
 
@@ -123,5 +142,38 @@ func hasAttachments(msg string) bool {
 		}
 	}
 
+	return false
+}
+
+func hasToolIntent(msg string) bool {
+	lower := strings.ToLower(msg)
+	if lower == "" {
+		return false
+	}
+
+	// Code fences and shell-like snippets are strong signals on their own.
+	if countCodeBlocks(msg) > 0 {
+		return true
+	}
+	for _, cue := range commandCues {
+		if strings.Contains(lower, cue) {
+			return true
+		}
+	}
+
+	artifactSignal := pathLikePattern.MatchString(msg) || fileExtPattern.MatchString(msg)
+	if !artifactSignal {
+		// Inline code spans can also carry repo/tool intent when paired with an action.
+		artifactSignal = strings.Count(msg, "`") >= 2
+	}
+	if !artifactSignal {
+		return false
+	}
+
+	for _, cue := range actionCues {
+		if strings.Contains(lower, cue) {
+			return true
+		}
+	}
 	return false
 }

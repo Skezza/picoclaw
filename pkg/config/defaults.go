@@ -22,12 +22,51 @@ func DefaultConfig() *Config {
 				Workspace:                 workspacePath,
 				RestrictToWorkspace:       true,
 				Provider:                  "",
+				ModelName:                 "gpt-5-mini",
+				ModelFallbacks:            []string{"gpt-5.4-mini"},
 				MaxTokens:                 32768,
 				Temperature:               nil, // nil means use provider default
 				MaxToolIterations:         50,
 				SummarizeMessageThreshold: 20,
 				SummarizeTokenPercent:     75,
-				SteeringMode:              "one-at-a-time",
+				Routing: &RoutingConfig{
+					Enabled:  true,
+					FreeTier: "free",
+					PaidTier: "heavy",
+					Tiers: []RoutingTierConfig{
+						{
+							Name:     "fast",
+							MaxScore: 0.20,
+							Model: &AgentModelConfig{
+								Primary:   "gpt-5.4-nano",
+								Fallbacks: []string{"gpt-5-nano"},
+							},
+						},
+						{
+							Name: "tools",
+							Model: &AgentModelConfig{
+								Primary:   "gpt-5.4-mini",
+								Fallbacks: []string{"gpt-5-mini"},
+							},
+						},
+						{
+							Name: "heavy",
+							Model: &AgentModelConfig{
+								Primary:   "gpt-5-mini",
+								Fallbacks: []string{"gpt-5.4-mini"},
+							},
+						},
+						{
+							Name:     "free",
+							MaxScore: -1,
+							Model: &AgentModelConfig{
+								Primary:   "openrouter-free-qwen",
+								Fallbacks: []string{"openrouter-free-oss", "openrouter-free-step"},
+							},
+						},
+					},
+				},
+				SteeringMode: "one-at-a-time",
 				ToolFeedback: ToolFeedbackConfig{
 					Enabled:       false,
 					MaxArgsLength: 300,
@@ -170,6 +209,26 @@ func DefaultConfig() *Config {
 				Model:     "openai/gpt-5.4",
 				APIBase:   "https://api.openai.com/v1",
 			},
+			{
+				ModelName: "gpt-5.4-mini",
+				Model:     "openai/gpt-5.4-mini",
+				APIBase:   "https://api.openai.com/v1",
+			},
+			{
+				ModelName: "gpt-5-mini",
+				Model:     "openai/gpt-5-mini",
+				APIBase:   "https://api.openai.com/v1",
+			},
+			{
+				ModelName: "gpt-5.4-nano",
+				Model:     "openai/gpt-5.4-nano",
+				APIBase:   "https://api.openai.com/v1",
+			},
+			{
+				ModelName: "gpt-5-nano",
+				Model:     "openai/gpt-5-nano",
+				APIBase:   "https://api.openai.com/v1",
+			},
 
 			// Anthropic Claude - https://console.anthropic.com/settings/keys
 			{
@@ -229,6 +288,21 @@ func DefaultConfig() *Config {
 			{
 				ModelName: "openrouter-gpt-5.4",
 				Model:     "openrouter/openai/gpt-5.4",
+				APIBase:   "https://openrouter.ai/api/v1",
+			},
+			{
+				ModelName: "openrouter-free-qwen",
+				Model:     "openrouter/qwen/qwen3-next-80b-a3b-instruct:free",
+				APIBase:   "https://openrouter.ai/api/v1",
+			},
+			{
+				ModelName: "openrouter-free-oss",
+				Model:     "openrouter/openai/gpt-oss-20b:free",
+				APIBase:   "https://openrouter.ai/api/v1",
+			},
+			{
+				ModelName: "openrouter-free-step",
+				Model:     "openrouter/stepfun/step-3.5-flash:free",
 				APIBase:   "https://openrouter.ai/api/v1",
 			},
 
@@ -428,6 +502,19 @@ func DefaultConfig() *Config {
 				EnableDenyPatterns: true,
 				AllowRemote:        true,
 				TimeoutSeconds:     60,
+			},
+			Git: GitToolsConfig{
+				ToolConfig: ToolConfig{
+					Enabled: false,
+				},
+				TimeoutSeconds: 60,
+			},
+			Github: GithubToolsConfig{
+				ToolConfig: ToolConfig{
+					Enabled: false,
+				},
+				BaseURL:        "https://api.github.com",
+				TimeoutSeconds: 20,
 			},
 			Skills: SkillsToolsConfig{
 				ToolConfig: ToolConfig{

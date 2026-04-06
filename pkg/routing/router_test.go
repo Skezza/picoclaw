@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -25,6 +26,9 @@ func TestExtractFeatures_EmptyMessage(t *testing.T) {
 	}
 	if f.HasAttachments {
 		t.Error("HasAttachments: got true, want false")
+	}
+	if f.ToolIntent {
+		t.Error("ToolIntent: got true, want false")
 	}
 }
 
@@ -143,6 +147,24 @@ func TestExtractFeatures_HasAttachments_Extension(t *testing.T) {
 	}
 }
 
+func TestExtractFeatures_ToolIntent(t *testing.T) {
+	cases := []struct {
+		msg  string
+		want bool
+	}{
+		{"fix src/app.ts and run tests", true},
+		{"please inspect ./pkg/agent/loop.go", true},
+		{"git status and then patch the handler", true},
+		{"what's the weather today?", false},
+	}
+	for _, tc := range cases {
+		f := ExtractFeatures(tc.msg, nil)
+		if f.ToolIntent != tc.want {
+			t.Errorf("msg=%q: ToolIntent got %v, want %v", tc.msg, f.ToolIntent, tc.want)
+		}
+	}
+}
+
 // ── RuleClassifier ───────────────────────────────────────────────────────────
 
 func TestRuleClassifier_ZeroFeatures(t *testing.T) {
@@ -239,6 +261,14 @@ func TestRuleClassifier_ScoreDoesNotExceedOne(t *testing.T) {
 	}
 }
 
+func TestRuleClassifier_ToolIntentRaisesScore(t *testing.T) {
+	c := &RuleClassifier{}
+	score := c.Score(Features{ToolIntent: true})
+	if score < 0.30 {
+		t.Fatalf("tool intent score = %f, want at least 0.30", score)
+	}
+}
+
 // ── Router ───────────────────────────────────────────────────────────────────
 
 func TestRouter_DefaultThreshold(t *testing.T) {
@@ -304,9 +334,7 @@ func TestRouter_SelectModel_LongMessageUsesPrimary(t *testing.T) {
 	}
 }
 
-func TestRouter_SelectModel_DeepToolChainUsesLight(t *testing.T) {
-	// Tool calls alone (0.25) don't cross the 0.35 threshold — acceptable behavior.
-	// Routing is conservative: only promote to heavy when the signal is unambiguous.
+func TestRouter_SelectModel_DeepToolChainUsesPrimary(t *testing.T) {
 	r := New(RouterConfig{LightModel: "gemini-flash", Threshold: 0.35})
 	history := []providers.Message{
 		{Role: "assistant", ToolCalls: []providers.ToolCall{{Name: "read_file"}, {Name: "write_file"}}},
@@ -314,8 +342,17 @@ func TestRouter_SelectModel_DeepToolChainUsesLight(t *testing.T) {
 	}
 	msg := "ok"
 	_, usedLight, _ := r.SelectModel(msg, history, "claude-sonnet-4-6")
-	if !usedLight {
-		t.Error("short message + moderate tool calls: expected light model (score 0.20 < 0.35)")
+	if usedLight {
+		t.Error("short message + tool history: expected primary model")
+	}
+}
+
+func TestRouter_SelectModel_ToolIntentUsesPrimaryInLegacyMode(t *testing.T) {
+	r := New(RouterConfig{LightModel: "gemini-flash", Threshold: 0.35})
+	msg := "fix ./pkg/agent/loop.go and run go test"
+	_, usedLight, _ := r.SelectModel(msg, nil, "claude-sonnet-4-6")
+	if usedLight {
+		t.Error("tool-intent prompt: expected primary model in legacy mode")
 	}
 }
 
@@ -346,12 +383,12 @@ func TestRouter_SelectModel_CustomThreshold(t *testing.T) {
 }
 
 func TestRouter_SelectModel_HighThreshold(t *testing.T) {
-	// Very high threshold: even code blocks route to light
+	// Tool-intent prompts stay on the primary model even with a high threshold.
 	r := New(RouterConfig{LightModel: "gemini-flash", Threshold: 0.99})
 	msg := "```go\nfmt.Println()\n```"
 	_, usedLight, _ := r.SelectModel(msg, nil, "claude-sonnet-4-6")
-	if !usedLight {
-		t.Error("very high threshold: code block (0.40) should route to light model")
+	if usedLight {
+		t.Error("very high threshold: code block should still use primary model")
 	}
 }
 
@@ -359,6 +396,72 @@ func TestRouter_LightModel(t *testing.T) {
 	r := New(RouterConfig{LightModel: "my-fast-model", Threshold: 0.35})
 	if r.LightModel() != "my-fast-model" {
 		t.Errorf("LightModel: got %q, want %q", r.LightModel(), "my-fast-model")
+	}
+}
+
+func TestRouter_SelectTier_UsesFirstMatchingTier(t *testing.T) {
+	r := New(RouterConfig{
+		Tiers: []config.RoutingTierConfig{
+			{Name: "free", MaxScore: 0.2},
+			{Name: "balanced", MaxScore: 1.0},
+		},
+	})
+
+	tier, _ := r.SelectTier("hi", nil)
+	if tier != "free" {
+		t.Fatalf("tier=%q, want %q", tier, "free")
+	}
+
+	complex := "```go\nfmt.Println(\"x\")\n```\nPlease refactor this with tests."
+	tier, _ = r.SelectTier(complex, nil)
+	if tier != "balanced" {
+		t.Fatalf("tier=%q, want %q", tier, "balanced")
+	}
+}
+
+func TestRouter_SelectTier_ToolIntentPrefersToolsTier(t *testing.T) {
+	r := New(RouterConfig{
+		Tiers: []config.RoutingTierConfig{
+			{Name: "fast", MaxScore: 0.2},
+			{Name: "tools", MaxScore: 0},
+			{Name: "heavy", MaxScore: 0},
+		},
+	})
+
+	tier, _ := r.SelectTier("fix ./pkg/agent/loop.go and run go test", nil)
+	if tier != "tools" {
+		t.Fatalf("tier=%q, want %q", tier, "tools")
+	}
+}
+
+func TestRouter_SelectTier_RecentToolCallsPreferToolsTier(t *testing.T) {
+	r := New(RouterConfig{
+		Tiers: []config.RoutingTierConfig{
+			{Name: "fast", MaxScore: 0.2},
+			{Name: "tools", MaxScore: 0},
+			{Name: "heavy", MaxScore: 0},
+		},
+	})
+	history := []providers.Message{
+		{Role: "assistant", ToolCalls: []providers.ToolCall{{Name: "read_file"}}},
+	}
+	tier, _ := r.SelectTier("ok", history)
+	if tier != "tools" {
+		t.Fatalf("tier=%q, want %q", tier, "tools")
+	}
+}
+
+func TestRouter_SelectTier_SkipsManualOnlyTiers(t *testing.T) {
+	r := New(RouterConfig{
+		Tiers: []config.RoutingTierConfig{
+			{Name: "free", MaxScore: -1},
+			{Name: "fast", MaxScore: 0.3},
+		},
+	})
+
+	tier, _ := r.SelectTier("hi", nil)
+	if tier != "fast" {
+		t.Fatalf("tier=%q, want %q", tier, "fast")
 	}
 }
 

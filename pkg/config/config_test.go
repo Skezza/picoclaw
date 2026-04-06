@@ -259,6 +259,114 @@ func TestDefaultConfig_MaxToolIterations(t *testing.T) {
 	}
 }
 
+func TestDefaultConfig_TieredRoutingHydrated(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if cfg.Agents.Defaults.ModelName != "gpt-5-mini" {
+		t.Fatalf("DefaultConfig().Agents.Defaults.ModelName = %q, want %q", cfg.Agents.Defaults.ModelName, "gpt-5-mini")
+	}
+	if got := cfg.Agents.Defaults.ModelFallbacks; len(got) != 1 || got[0] != "gpt-5.4-mini" {
+		t.Fatalf("DefaultConfig().Agents.Defaults.ModelFallbacks = %v, want [gpt-5.4-mini]", got)
+	}
+
+	rt := cfg.Agents.Defaults.Routing
+	if rt == nil {
+		t.Fatal("DefaultConfig().Agents.Defaults.Routing should be configured")
+	}
+	if !rt.Enabled {
+		t.Fatal("DefaultConfig().Agents.Defaults.Routing.Enabled should be true")
+	}
+	if rt.FreeTier != "free" {
+		t.Fatalf("DefaultConfig().Agents.Defaults.Routing.FreeTier = %q, want %q", rt.FreeTier, "free")
+	}
+	if rt.PaidTier != "heavy" {
+		t.Fatalf("DefaultConfig().Agents.Defaults.Routing.PaidTier = %q, want %q", rt.PaidTier, "heavy")
+	}
+
+	expected := map[string]struct {
+		maxScore  float64
+		primary   string
+		fallbacks []string
+	}{
+		"fast": {
+			maxScore:  0.20,
+			primary:   "gpt-5.4-nano",
+			fallbacks: []string{"gpt-5-nano"},
+		},
+		"tools": {
+			maxScore:  0,
+			primary:   "gpt-5.4-mini",
+			fallbacks: []string{"gpt-5-mini"},
+		},
+		"heavy": {
+			maxScore:  0,
+			primary:   "gpt-5-mini",
+			fallbacks: []string{"gpt-5.4-mini"},
+		},
+		"free": {
+			maxScore:  -1,
+			primary:   "openrouter-free-qwen",
+			fallbacks: []string{"openrouter-free-oss", "openrouter-free-step"},
+		},
+	}
+
+	if len(rt.Tiers) != len(expected) {
+		t.Fatalf("DefaultConfig().Agents.Defaults.Routing.Tiers len = %d, want %d", len(rt.Tiers), len(expected))
+	}
+
+	for _, tier := range rt.Tiers {
+		want, ok := expected[tier.Name]
+		if !ok {
+			t.Fatalf("unexpected routing tier %q in defaults", tier.Name)
+		}
+		if tier.MaxScore != want.maxScore {
+			t.Fatalf("tier %q max_score = %v, want %v", tier.Name, tier.MaxScore, want.maxScore)
+		}
+		if tier.Model == nil {
+			t.Fatalf("tier %q model should not be nil", tier.Name)
+		}
+		if tier.Model.Primary != want.primary {
+			t.Fatalf("tier %q primary = %q, want %q", tier.Name, tier.Model.Primary, want.primary)
+		}
+		if strings.Join(tier.Model.Fallbacks, ",") != strings.Join(want.fallbacks, ",") {
+			t.Fatalf("tier %q fallbacks = %v, want %v", tier.Name, tier.Model.Fallbacks, want.fallbacks)
+		}
+	}
+
+	if err := cfg.ValidateRouting(); err != nil {
+		t.Fatalf("DefaultConfig().ValidateRouting() error = %v", err)
+	}
+}
+
+func TestDefaultConfig_TieredModelAliasesPresent(t *testing.T) {
+	cfg := DefaultConfig()
+
+	expectedModels := map[string]string{
+		"gpt-5.4-mini":         "openai/gpt-5.4-mini",
+		"gpt-5-mini":           "openai/gpt-5-mini",
+		"gpt-5.4-nano":         "openai/gpt-5.4-nano",
+		"gpt-5-nano":           "openai/gpt-5-nano",
+		"openrouter-free-qwen": "openrouter/qwen/qwen3-next-80b-a3b-instruct:free",
+		"openrouter-free-oss":  "openrouter/openai/gpt-oss-20b:free",
+		"openrouter-free-step": "openrouter/stepfun/step-3.5-flash:free",
+	}
+
+	modelsByName := make(map[string]*ModelConfig, len(cfg.ModelList))
+	for _, modelCfg := range cfg.ModelList {
+		modelsByName[modelCfg.ModelName] = modelCfg
+	}
+
+	for modelName, modelPath := range expectedModels {
+		modelCfg, ok := modelsByName[modelName]
+		if !ok {
+			t.Fatalf("DefaultConfig().ModelList missing %q", modelName)
+		}
+		if modelCfg.Model != modelPath {
+			t.Fatalf("model %q path = %q, want %q", modelName, modelCfg.Model, modelPath)
+		}
+	}
+}
+
 // TestDefaultConfig_Temperature verifies temperature has default value
 func TestDefaultConfig_Temperature(t *testing.T) {
 	cfg := DefaultConfig()
@@ -348,7 +456,7 @@ func TestSaveConfig_FilePermissions(t *testing.T) {
 	}
 }
 
-func TestSaveConfig_IncludesEmptyLegacyModelField(t *testing.T) {
+func TestSaveConfig_IncludesHydratedDefaultModelField(t *testing.T) {
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "config.json")
 
@@ -362,8 +470,8 @@ func TestSaveConfig_IncludesEmptyLegacyModelField(t *testing.T) {
 		t.Fatalf("ReadFile failed: %v", err)
 	}
 
-	if !strings.Contains(string(data), `"model_name": ""`) {
-		t.Fatalf("saved config should include empty legacy model_name field, got: %s", string(data))
+	if !strings.Contains(string(data), `"model_name": "gpt-5-mini"`) {
+		t.Fatalf("saved config should include hydrated default model_name, got: %s", string(data))
 	}
 }
 
@@ -557,6 +665,26 @@ func TestDefaultConfig_ExecAllowRemoteEnabled(t *testing.T) {
 	cfg := DefaultConfig()
 	if !cfg.Tools.Exec.AllowRemote {
 		t.Fatal("DefaultConfig().Tools.Exec.AllowRemote should be true")
+	}
+}
+
+func TestDefaultConfig_GitTimeout(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.Tools.Git.TimeoutSeconds != 60 {
+		t.Fatalf("DefaultConfig().Tools.Git.TimeoutSeconds = %d, want 60", cfg.Tools.Git.TimeoutSeconds)
+	}
+}
+
+func TestDefaultConfig_GithubDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.Tools.Github.Enabled {
+		t.Fatal("DefaultConfig().Tools.Github.Enabled should be false")
+	}
+	if cfg.Tools.Github.BaseURL != "https://api.github.com" {
+		t.Fatalf("DefaultConfig().Tools.Github.BaseURL = %q, want https://api.github.com", cfg.Tools.Github.BaseURL)
+	}
+	if cfg.Tools.Github.TimeoutSeconds != 20 {
+		t.Fatalf("DefaultConfig().Tools.Github.TimeoutSeconds = %d, want 20", cfg.Tools.Github.TimeoutSeconds)
 	}
 }
 

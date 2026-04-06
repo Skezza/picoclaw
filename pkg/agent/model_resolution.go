@@ -8,6 +8,8 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
+const routingTierRefPrefix = "tier:"
+
 func ensureProtocolModel(model string) string {
 	model = strings.TrimSpace(model)
 	if model == "" {
@@ -167,4 +169,24 @@ func resolvedModelConfig(cfg *config.Config, modelName, workspace string) (*conf
 	}
 
 	return &clone, nil
+}
+
+func routingTierRef(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	return routingTierRefPrefix + name
+}
+
+func parseRoutingTierRef(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if !strings.HasPrefix(strings.ToLower(raw), routingTierRefPrefix) {
+		return "", false
+	}
+	name := strings.TrimSpace(raw[len(routingTierRefPrefix):])
+	if name == "" {
+		return "", false
+	}
+	return name, true
 }

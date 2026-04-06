@@ -200,16 +200,30 @@ type SessionConfig struct {
 	IdentityLinks map[string][]string `json:"identity_links,omitempty"`
 }
 
+// RoutingTierConfig defines a named tier that routing can select.
+// Tiers are evaluated in order; the first tier whose MaxScore is >= the
+// computed complexity score is selected. A MaxScore of 0 means "catch-all".
+// A MaxScore below 0 marks the tier as manual-only, so commands like /free or
+// /paid can select it without /route ever picking it automatically.
+type RoutingTierConfig struct {
+	Name     string            `json:"name"`
+	MaxScore float64           `json:"max_score,omitempty"`
+	Model    *AgentModelConfig `json:"model,omitempty"`
+}
+
 // RoutingConfig controls the intelligent model routing feature.
 // When enabled, each incoming message is scored against structural features
 // (message length, code blocks, tool call history, conversation depth, attachments).
-// Messages scoring below Threshold are sent to LightModel; all others use the
-// agent's primary model. This reduces cost and latency for simple tasks without
-// requiring any keyword matching — all scoring is language-agnostic.
+// Legacy configs can continue to use LightModel/Threshold; newer configs can
+// define named tiers with their own model chains and use FreeTier/PaidTier
+// for the session mode commands.
 type RoutingConfig struct {
-	Enabled    bool    `json:"enabled"`
-	LightModel string  `json:"light_model"` // model_name from model_list to use for simple tasks
-	Threshold  float64 `json:"threshold"`   // complexity score in [0,1]; score >= threshold → primary model
+	Enabled    bool                `json:"enabled"`
+	LightModel string              `json:"light_model,omitempty"` // legacy: model_name from model_list to use for simple tasks
+	Threshold  float64             `json:"threshold,omitempty"`   // legacy: complexity score in [0,1]; score >= threshold → primary model
+	Tiers      []RoutingTierConfig `json:"tiers,omitempty"`
+	FreeTier   string              `json:"free_tier,omitempty"`
+	PaidTier   string              `json:"paid_tier,omitempty"`
 }
 
 // SubTurnConfig configures the SubTurn execution system.
@@ -805,6 +819,19 @@ type ExecConfig struct {
 	TimeoutSeconds      int      `                                 json:"timeout_seconds"       env:"PICOCLAW_TOOLS_EXEC_TIMEOUT_SECONDS"` // 0 means use default (60s)
 }
 
+type GitToolsConfig struct {
+	ToolConfig     `         envPrefix:"PICOCLAW_TOOLS_GIT_"`
+	TimeoutSeconds int `                                 json:"timeout_seconds" env:"PICOCLAW_TOOLS_GIT_TIMEOUT_SECONDS"` // 0 means use default (60s)
+}
+
+type GithubToolsConfig struct {
+	ToolConfig     `         envPrefix:"PICOCLAW_TOOLS_GITHUB_"`
+	Token          SecureString `json:"token,omitzero"     yaml:"token,omitempty" env:"PICOCLAW_TOOLS_GITHUB_TOKEN"`
+	BaseURL        string       `json:"base_url,omitempty" yaml:"-"                env:"PICOCLAW_TOOLS_GITHUB_BASE_URL"`
+	Proxy          string       `json:"proxy,omitempty"    yaml:"-"                env:"PICOCLAW_TOOLS_GITHUB_PROXY"`
+	TimeoutSeconds int          `json:"timeout_seconds"    yaml:"-"                env:"PICOCLAW_TOOLS_GITHUB_TIMEOUT_SECONDS"`
+}
+
 type SkillsToolsConfig struct {
 	ToolConfig            `                       yaml:"-"                 envPrefix:"PICOCLAW_TOOLS_SKILLS_"`
 	Registries            SkillsRegistriesConfig `yaml:",inline,omitempty"                                    json:"registries"`
@@ -855,6 +882,8 @@ type ToolsConfig struct {
 	Web             WebToolsConfig     `json:"web"               yaml:"web,omitempty"`
 	Cron            CronToolsConfig    `json:"cron"              yaml:"-"`
 	Exec            ExecConfig         `json:"exec"              yaml:"-"`
+	Git             GitToolsConfig     `json:"git"               yaml:"-"`
+	Github          GithubToolsConfig  `json:"github"            yaml:"github,omitempty"`
 	Skills          SkillsToolsConfig  `json:"skills"            yaml:"skills,omitempty"`
 	MediaCleanup    MediaCleanupConfig `json:"media_cleanup"     yaml:"-"`
 	MCP             MCPConfig          `json:"mcp"               yaml:"-"`
@@ -1084,6 +1113,9 @@ func LoadConfig(path string) (*Config, error) {
 	if err = cfg.ValidateModelList(); err != nil {
 		return nil, err
 	}
+	if err = cfg.ValidateRouting(); err != nil {
+		return nil, err
+	}
 
 	// Ensure Workspace has a default if not set
 	if cfg.Agents.Defaults.Workspace == "" {
@@ -1219,6 +1251,49 @@ func (c *Config) ValidateModelList() error {
 	return nil
 }
 
+func (c *Config) ValidateRouting() error {
+	if c == nil || c.Agents.Defaults.Routing == nil {
+		return nil
+	}
+
+	rc := c.Agents.Defaults.Routing
+	seen := make(map[string]struct{}, len(rc.Tiers))
+	for i, tier := range rc.Tiers {
+		name := strings.TrimSpace(tier.Name)
+		if name == "" {
+			return fmt.Errorf("agents.defaults.routing.tiers[%d]: name is required", i)
+		}
+		key := strings.ToLower(name)
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("agents.defaults.routing.tiers[%d]: duplicate tier name %q", i, name)
+		}
+		seen[key] = struct{}{}
+
+		if tier.Model == nil || strings.TrimSpace(tier.Model.Primary) == "" {
+			return fmt.Errorf("agents.defaults.routing.tiers[%d]: model.primary is required", i)
+		}
+	}
+
+	validateTierRef := func(fieldName, tierName string) error {
+		tierName = strings.TrimSpace(tierName)
+		if tierName == "" {
+			return nil
+		}
+		if _, ok := seen[strings.ToLower(tierName)]; !ok {
+			return fmt.Errorf("agents.defaults.routing.%s references unknown tier %q", fieldName, tierName)
+		}
+		return nil
+	}
+
+	if err := validateTierRef("free_tier", rc.FreeTier); err != nil {
+		return err
+	}
+	if err := validateTierRef("paid_tier", rc.PaidTier); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (c *Config) SecurityCopyFrom(path string) error {
 	return loadSecurityConfig(c, securityPath(path))
 }
@@ -1312,6 +1387,10 @@ func (t *ToolsConfig) IsToolEnabled(name string) bool {
 		return t.Cron.Enabled
 	case "exec":
 		return t.Exec.Enabled
+	case "git":
+		return t.Git.Enabled
+	case "github":
+		return t.Github.Enabled
 	case "skills":
 		return t.Skills.Enabled
 	case "media_cleanup":

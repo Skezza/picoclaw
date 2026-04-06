@@ -13,9 +13,36 @@ func newModeTestRuntime() *Runtime {
 		Config: &config.Config{
 			Agents: config.AgentsConfig{
 				Defaults: config.AgentDefaults{
-					ModelName: "gpt-5.4-mini",
+					ModelName: "gpt-5-mini",
 					Routing: &config.RoutingConfig{
-						LightModel: "openrouter-free",
+						FreeTier: "free",
+						PaidTier: "heavy",
+						Tiers: []config.RoutingTierConfig{
+							{
+								Name: "fast",
+								Model: &config.AgentModelConfig{
+									Primary: "gpt-5.4-nano",
+								},
+							},
+							{
+								Name: "tools",
+								Model: &config.AgentModelConfig{
+									Primary: "gpt-5.4-mini",
+								},
+							},
+							{
+								Name: "heavy",
+								Model: &config.AgentModelConfig{
+									Primary: "gpt-5-mini",
+								},
+							},
+							{
+								Name: "free",
+								Model: &config.AgentModelConfig{
+									Primary: "openrouter-free",
+								},
+							},
+						},
 					},
 				},
 			},
@@ -44,10 +71,10 @@ func TestBoostCommand_ArmsNextModel(t *testing.T) {
 	if res.Outcome != OutcomeHandled {
 		t.Fatalf("outcome=%v, want=%v", res.Outcome, OutcomeHandled)
 	}
-	if armed != "gpt-5.4-mini" {
-		t.Fatalf("armed=%q, want %q", armed, "gpt-5.4-mini")
+	if armed != "tier:heavy" {
+		t.Fatalf("armed=%q, want %q", armed, "tier:heavy")
 	}
-	if reply != "Boost armed. Next message will use gpt-5.4-mini." {
+	if reply != "Boost armed. Next message will use gpt-5-mini." {
 		t.Fatalf("reply=%q, want boost confirmation", reply)
 	}
 }
@@ -55,8 +82,13 @@ func TestBoostCommand_ArmsNextModel(t *testing.T) {
 func TestPaidCommand_SetsPersistentModel(t *testing.T) {
 	rt := newModeTestRuntime()
 	var persistent string
+	workMode := "code"
 	rt.SetSessionModelMode = func(value string) error {
 		persistent = value
+		return nil
+	}
+	rt.ClearSessionWorkMode = func() error {
+		workMode = ""
 		return nil
 	}
 
@@ -73,19 +105,63 @@ func TestPaidCommand_SetsPersistentModel(t *testing.T) {
 	if res.Outcome != OutcomeHandled {
 		t.Fatalf("outcome=%v, want=%v", res.Outcome, OutcomeHandled)
 	}
-	if persistent != "gpt-5.4-mini" {
-		t.Fatalf("persistent=%q, want %q", persistent, "gpt-5.4-mini")
+	if persistent != "tier:heavy" {
+		t.Fatalf("persistent=%q, want %q", persistent, "tier:heavy")
 	}
-	if reply != "Session mode set to paid (gpt-5.4-mini)." {
+	if workMode != "" {
+		t.Fatalf("workMode=%q, want cleared", workMode)
+	}
+	if reply != "Legacy paid mode set to heavy (gpt-5-mini)." {
 		t.Fatalf("reply=%q, want paid confirmation", reply)
+	}
+}
+
+func TestCodeCommand_SetsWorkModeAndPaidModel(t *testing.T) {
+	rt := newModeTestRuntime()
+	var persistent, workMode string
+	rt.SetSessionModelMode = func(value string) error {
+		persistent = value
+		return nil
+	}
+	rt.SetSessionWorkMode = func(value string) error {
+		workMode = value
+		return nil
+	}
+
+	ex := NewExecutor(NewRegistry(BuiltinDefinitions()), rt)
+
+	var reply string
+	res := ex.Execute(context.Background(), Request{
+		Text: "/code",
+		Reply: func(text string) error {
+			reply = text
+			return nil
+		},
+	})
+	if res.Outcome != OutcomeHandled {
+		t.Fatalf("outcome=%v, want=%v", res.Outcome, OutcomeHandled)
+	}
+	if persistent != "tier:tools" {
+		t.Fatalf("persistent=%q, want %q", persistent, "tier:tools")
+	}
+	if workMode != "code" {
+		t.Fatalf("workMode=%q, want %q", workMode, "code")
+	}
+	if reply != "Session mode set to code (gpt-5.4-mini)." {
+		t.Fatalf("reply=%q, want code confirmation", reply)
 	}
 }
 
 func TestFreeCommand_SetsPersistentModel(t *testing.T) {
 	rt := newModeTestRuntime()
 	var persistent string
+	workMode := "code"
 	rt.SetSessionModelMode = func(value string) error {
 		persistent = value
+		return nil
+	}
+	rt.ClearSessionWorkMode = func() error {
+		workMode = ""
 		return nil
 	}
 
@@ -102,11 +178,83 @@ func TestFreeCommand_SetsPersistentModel(t *testing.T) {
 	if res.Outcome != OutcomeHandled {
 		t.Fatalf("outcome=%v, want=%v", res.Outcome, OutcomeHandled)
 	}
-	if persistent != "openrouter-free" {
-		t.Fatalf("persistent=%q, want %q", persistent, "openrouter-free")
+	if persistent != "tier:free" {
+		t.Fatalf("persistent=%q, want %q", persistent, "tier:free")
+	}
+	if workMode != "" {
+		t.Fatalf("workMode=%q, want cleared", workMode)
 	}
 	if reply != "Session mode set to free (openrouter-free)." {
 		t.Fatalf("reply=%q, want free confirmation", reply)
+	}
+}
+
+func TestDefaultCommand_ClearsSessionModel(t *testing.T) {
+	rt := newModeTestRuntime()
+	persistent := "tier:free"
+	pending := "tier:heavy"
+	workMode := "code"
+	rt.GetSessionModelMode = func() (string, string) {
+		return persistent, pending
+	}
+	rt.GetSessionWorkMode = func() string { return workMode }
+	rt.ClearSessionModelMode = func() error {
+		persistent = ""
+		pending = ""
+		return nil
+	}
+	rt.ClearSessionWorkMode = func() error {
+		workMode = ""
+		return nil
+	}
+
+	ex := NewExecutor(NewRegistry(BuiltinDefinitions()), rt)
+
+	var reply string
+	res := ex.Execute(context.Background(), Request{
+		Text: "/default",
+		Reply: func(text string) error {
+			reply = text
+			return nil
+		},
+	})
+	if res.Outcome != OutcomeHandled {
+		t.Fatalf("outcome=%v, want=%v", res.Outcome, OutcomeHandled)
+	}
+	if persistent != "" || pending != "" || workMode != "" {
+		t.Fatalf("persistent=%q pending=%q workMode=%q, want all cleared", persistent, pending, workMode)
+	}
+	if reply != "Session mode set to route." {
+		t.Fatalf("reply=%q, want default confirmation", reply)
+	}
+}
+
+func TestRouteCommand_ClearsSessionModel(t *testing.T) {
+	rt := newModeTestRuntime()
+	cleared := false
+	rt.ClearSessionModelMode = func() error {
+		cleared = true
+		return nil
+	}
+
+	ex := NewExecutor(NewRegistry(BuiltinDefinitions()), rt)
+
+	var reply string
+	res := ex.Execute(context.Background(), Request{
+		Text: "/route",
+		Reply: func(text string) error {
+			reply = text
+			return nil
+		},
+	})
+	if res.Outcome != OutcomeHandled {
+		t.Fatalf("outcome=%v, want=%v", res.Outcome, OutcomeHandled)
+	}
+	if !cleared {
+		t.Fatal("expected session mode to be cleared")
+	}
+	if reply != "Session mode set to route." {
+		t.Fatalf("reply=%q, want route confirmation", reply)
 	}
 }
 
@@ -116,8 +264,9 @@ func TestStatusCommand_ReportsPendingBoost(t *testing.T) {
 		return "gpt-5.4-mini", "openai"
 	}
 	rt.GetSessionModelMode = func() (string, string) {
-		return "openrouter-free", "gpt-5.4-mini"
+		return "tier:free", "tier:heavy"
 	}
+	rt.GetSessionWorkMode = func() string { return "code" }
 
 	ex := NewExecutor(NewRegistry(BuiltinDefinitions()), rt)
 
@@ -134,9 +283,12 @@ func TestStatusCommand_ReportsPendingBoost(t *testing.T) {
 	}
 	if !containsAll(reply, []string{
 		"Current Model: gpt-5.4-mini (Provider: openai)",
-		"Session Mode: boost armed for next message (gpt-5.4-mini)",
-		"Pending Boost: gpt-5.4-mini",
-		"Paid Model: gpt-5.4-mini",
+		"Session Mode: boost armed for next message (gpt-5-mini)",
+		"Work Mode: code",
+		"Pending Boost: gpt-5-mini",
+		"Fast Model: gpt-5.4-nano",
+		"Heavy Model: gpt-5-mini",
+		"Tools Model: gpt-5.4-mini",
 		"Free Model: openrouter-free",
 	}) {
 		t.Fatalf("reply=%q, missing expected status content", reply)

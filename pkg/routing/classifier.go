@@ -21,6 +21,7 @@ type Classifier interface {
 //	token > 200 (≈600 chars): 0.35  — very long prompts are almost always complex
 //	token 50-200:             0.15  — medium length; may or may not be complex
 //	code block present:       0.40  — coding tasks need the heavy model
+//	tool intent detected:     0.30  — repo/tool prompts should leave nano early
 //	tool calls > 3 (recent):  0.25  — dense tool usage signals an agentic workflow
 //	tool calls 1-3 (recent):  0.10  — some tool activity
 //	conversation depth > 10:  0.10  — long sessions carry implicit complexity
@@ -56,6 +57,9 @@ func (c *RuleClassifier) Score(f Features) float64 {
 	// Fenced code blocks — strongest indicator of a coding/technical task
 	if f.CodeBlockCount > 0 {
 		score += 0.40
+	}
+	if f.ToolIntent {
+		score += 0.30
 	}
 
 	// Recent tool call density — indicates an ongoing agentic workflow
