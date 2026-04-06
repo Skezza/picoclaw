@@ -26,18 +26,19 @@ const CurrentVersion = 2
 
 // Config is the current config structure with version support
 type Config struct {
-	Version   int             `json:"version"            yaml:"-"` // Config schema version for migration
-	Agents    AgentsConfig    `json:"agents"             yaml:"-"`
-	Bindings  []AgentBinding  `json:"bindings,omitempty" yaml:"-"`
-	Session   SessionConfig   `json:"session,omitempty"  yaml:"-"`
-	Channels  ChannelsConfig  `json:"channels"           yaml:"channels"`
-	ModelList SecureModelList `json:"model_list"         yaml:"model_list"` // New model-centric provider configuration
-	Gateway   GatewayConfig   `json:"gateway"            yaml:"-"`
-	Hooks     HooksConfig     `json:"hooks,omitempty"    yaml:"-"`
-	Tools     ToolsConfig     `json:"tools"              yaml:",inline"`
-	Heartbeat HeartbeatConfig `json:"heartbeat"          yaml:"-"`
-	Devices   DevicesConfig   `json:"devices"            yaml:"-"`
-	Voice     VoiceConfig     `json:"voice"              yaml:"-"`
+	Version     int               `json:"version"            yaml:"-"` // Config schema version for migration
+	Agents      AgentsConfig      `json:"agents"             yaml:"-"`
+	Bindings    []AgentBinding    `json:"bindings,omitempty" yaml:"-"`
+	Session     SessionConfig     `json:"session,omitempty"  yaml:"-"`
+	Channels    ChannelsConfig    `json:"channels"           yaml:"channels"`
+	ModelList   SecureModelList   `json:"model_list"         yaml:"model_list"` // New model-centric provider configuration
+	Gateway     GatewayConfig     `json:"gateway"            yaml:"-"`
+	Hooks       HooksConfig       `json:"hooks,omitempty"    yaml:"-"`
+	Tools       ToolsConfig       `json:"tools"              yaml:",inline"`
+	SelfImprove SelfImproveConfig `json:"self_improve,omitempty" yaml:"-"`
+	Heartbeat   HeartbeatConfig   `json:"heartbeat"          yaml:"-"`
+	Devices     DevicesConfig     `json:"devices"            yaml:"-"`
+	Voice       VoiceConfig       `json:"voice"              yaml:"-"`
 	// BuildInfo contains build-time version information
 	BuildInfo BuildInfo `json:"build_info,omitempty" yaml:"-"`
 
@@ -203,8 +204,8 @@ type SessionConfig struct {
 // RoutingTierConfig defines a named tier that routing can select.
 // Tiers are evaluated in order; the first tier whose MaxScore is >= the
 // computed complexity score is selected. A MaxScore of 0 means "catch-all".
-// A MaxScore below 0 marks the tier as manual-only, so an explicit session-mode
-// command can select it without /route ever picking it automatically.
+// A MaxScore below 0 marks the tier as manual-only, so commands like /free or
+// /paid can select it without /route ever picking it automatically.
 type RoutingTierConfig struct {
 	Name     string            `json:"name"`
 	MaxScore float64           `json:"max_score,omitempty"`
@@ -215,13 +216,14 @@ type RoutingTierConfig struct {
 // When enabled, each incoming message is scored against structural features
 // (message length, code blocks, tool call history, conversation depth, attachments).
 // Legacy configs can continue to use LightModel/Threshold; newer configs can
-// define named tiers with their own model chains and use PaidTier
+// define named tiers with their own model chains and use FreeTier/PaidTier
 // for the session mode commands.
 type RoutingConfig struct {
 	Enabled    bool                `json:"enabled"`
 	LightModel string              `json:"light_model,omitempty"` // legacy: model_name from model_list to use for simple tasks
 	Threshold  float64             `json:"threshold,omitempty"`   // legacy: complexity score in [0,1]; score >= threshold → primary model
 	Tiers      []RoutingTierConfig `json:"tiers,omitempty"`
+	FreeTier   string              `json:"free_tier,omitempty"`
 	PaidTier   string              `json:"paid_tier,omitempty"`
 }
 
@@ -589,6 +591,23 @@ type DevicesConfig struct {
 	MonitorUSB bool `json:"monitor_usb" env:"PICOCLAW_DEVICES_MONITOR_USB"`
 }
 
+type SelfImproveTargetConfig struct {
+	Enabled             bool   `json:"enabled"               env:"PICOCLAW_SELF_IMPROVE_TARGET_ENABLED"`
+	DeployBranch        string `json:"deploy_branch"         env:"PICOCLAW_SELF_IMPROVE_TARGET_DEPLOY_BRANCH"`
+	ServiceName         string `json:"service_name"          env:"PICOCLAW_SELF_IMPROVE_TARGET_SERVICE_NAME"`
+	HealthURL           string `json:"health_url,omitempty"  env:"PICOCLAW_SELF_IMPROVE_TARGET_HEALTH_URL"`
+	PollIntervalSeconds int    `json:"poll_interval_seconds" env:"PICOCLAW_SELF_IMPROVE_TARGET_POLL_INTERVAL_SECONDS"`
+	InstallRoot         string `json:"install_root,omitempty" env:"PICOCLAW_SELF_IMPROVE_TARGET_INSTALL_ROOT"`
+}
+
+type SelfImproveConfig struct {
+	Enabled             bool                               `json:"enabled"               env:"PICOCLAW_SELF_IMPROVE_ENABLED"`
+	Repo                string                             `json:"repo,omitempty"        env:"PICOCLAW_SELF_IMPROVE_REPO"`
+	SSHPreferred        bool                               `json:"ssh_preferred"         env:"PICOCLAW_SELF_IMPROVE_SSH_PREFERRED"`
+	PublishBranchPrefix string                             `json:"publish_branch_prefix" env:"PICOCLAW_SELF_IMPROVE_PUBLISH_BRANCH_PREFIX"`
+	Targets             map[string]SelfImproveTargetConfig `json:"targets,omitempty"`
+}
+
 type VoiceConfig struct {
 	ModelName         string `json:"model_name,omitempty"     env:"PICOCLAW_VOICE_MODEL_NAME"`
 	TTSModelName      string `json:"tts_model_name,omitempty" env:"PICOCLAW_VOICE_TTS_MODEL_NAME"`
@@ -831,6 +850,13 @@ type GithubToolsConfig struct {
 	TimeoutSeconds int          `json:"timeout_seconds"    yaml:"-"                env:"PICOCLAW_TOOLS_GITHUB_TIMEOUT_SECONDS"`
 }
 
+type HomeAssistantToolsConfig struct {
+	ToolConfig     `         envPrefix:"PICOCLAW_TOOLS_HOME_ASSISTANT_"`
+	BaseURL        string       `json:"base_url,omitempty" yaml:"-"                env:"PICOCLAW_TOOLS_HOME_ASSISTANT_BASE_URL"`
+	Token          SecureString `json:"token,omitzero"     yaml:"token,omitempty"  env:"PICOCLAW_TOOLS_HOME_ASSISTANT_TOKEN"`
+	TimeoutSeconds int          `json:"timeout_seconds"    yaml:"-"                env:"PICOCLAW_TOOLS_HOME_ASSISTANT_TIMEOUT_SECONDS"`
+}
+
 type SkillsToolsConfig struct {
 	ToolConfig            `                       yaml:"-"                 envPrefix:"PICOCLAW_TOOLS_SKILLS_"`
 	Registries            SkillsRegistriesConfig `yaml:",inline,omitempty"                                    json:"registries"`
@@ -877,31 +903,32 @@ type ToolsConfig struct {
 	// FilterMinLength is the minimum content length required for filtering.
 	// Content shorter than this will be returned unchanged for performance.
 	// Default: 8
-	FilterMinLength int                `json:"filter_min_length" yaml:"-"                env:"PICOCLAW_TOOLS_FILTER_MIN_LENGTH"`
-	Web             WebToolsConfig     `json:"web"               yaml:"web,omitempty"`
-	Cron            CronToolsConfig    `json:"cron"              yaml:"-"`
-	Exec            ExecConfig         `json:"exec"              yaml:"-"`
-	Git             GitToolsConfig     `json:"git"               yaml:"-"`
-	Github          GithubToolsConfig  `json:"github"            yaml:"github,omitempty"`
-	Skills          SkillsToolsConfig  `json:"skills"            yaml:"skills,omitempty"`
-	MediaCleanup    MediaCleanupConfig `json:"media_cleanup"     yaml:"-"`
-	MCP             MCPConfig          `json:"mcp"               yaml:"-"`
-	AppendFile      ToolConfig         `json:"append_file"       yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_APPEND_FILE_"`
-	EditFile        ToolConfig         `json:"edit_file"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_EDIT_FILE_"`
-	FindSkills      ToolConfig         `json:"find_skills"       yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_FIND_SKILLS_"`
-	I2C             ToolConfig         `json:"i2c"               yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_I2C_"`
-	InstallSkill    ToolConfig         `json:"install_skill"     yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_INSTALL_SKILL_"`
-	ListDir         ToolConfig         `json:"list_dir"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_LIST_DIR_"`
-	Message         ToolConfig         `json:"message"           yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_MESSAGE_"`
-	ReadFile        ReadFileToolConfig `json:"read_file"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_READ_FILE_"`
-	SendFile        ToolConfig         `json:"send_file"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SEND_FILE_"`
-	SendTTS         ToolConfig         `json:"send_tts"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SEND_TTS_"`
-	Spawn           ToolConfig         `json:"spawn"             yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPAWN_"`
-	SpawnStatus     ToolConfig         `json:"spawn_status"      yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPAWN_STATUS_"`
-	SPI             ToolConfig         `json:"spi"               yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPI_"`
-	Subagent        ToolConfig         `json:"subagent"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SUBAGENT_"`
-	WebFetch        ToolConfig         `json:"web_fetch"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WEB_FETCH_"`
-	WriteFile       ToolConfig         `json:"write_file"        yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WRITE_FILE_"`
+	FilterMinLength int                      `json:"filter_min_length" yaml:"-"                env:"PICOCLAW_TOOLS_FILTER_MIN_LENGTH"`
+	Web             WebToolsConfig           `json:"web"               yaml:"web,omitempty"`
+	Cron            CronToolsConfig          `json:"cron"              yaml:"-"`
+	Exec            ExecConfig               `json:"exec"              yaml:"-"`
+	Git             GitToolsConfig           `json:"git"               yaml:"-"`
+	Github          GithubToolsConfig        `json:"github"            yaml:"github,omitempty"`
+	HomeAssistant   HomeAssistantToolsConfig `json:"home_assistant" yaml:"-"`
+	Skills          SkillsToolsConfig        `json:"skills"            yaml:"skills,omitempty"`
+	MediaCleanup    MediaCleanupConfig       `json:"media_cleanup"     yaml:"-"`
+	MCP             MCPConfig                `json:"mcp"               yaml:"-"`
+	AppendFile      ToolConfig               `json:"append_file"       yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_APPEND_FILE_"`
+	EditFile        ToolConfig               `json:"edit_file"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_EDIT_FILE_"`
+	FindSkills      ToolConfig               `json:"find_skills"       yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_FIND_SKILLS_"`
+	I2C             ToolConfig               `json:"i2c"               yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_I2C_"`
+	InstallSkill    ToolConfig               `json:"install_skill"     yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_INSTALL_SKILL_"`
+	ListDir         ToolConfig               `json:"list_dir"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_LIST_DIR_"`
+	Message         ToolConfig               `json:"message"           yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_MESSAGE_"`
+	ReadFile        ReadFileToolConfig       `json:"read_file"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_READ_FILE_"`
+	SendFile        ToolConfig               `json:"send_file"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SEND_FILE_"`
+	SendTTS         ToolConfig               `json:"send_tts"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SEND_TTS_"`
+	Spawn           ToolConfig               `json:"spawn"             yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPAWN_"`
+	SpawnStatus     ToolConfig               `json:"spawn_status"      yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPAWN_STATUS_"`
+	SPI             ToolConfig               `json:"spi"               yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPI_"`
+	Subagent        ToolConfig               `json:"subagent"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SUBAGENT_"`
+	WebFetch        ToolConfig               `json:"web_fetch"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WEB_FETCH_"`
+	WriteFile       ToolConfig               `json:"write_file"        yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WRITE_FILE_"`
 }
 
 // IsFilterSensitiveDataEnabled returns true if sensitive data filtering is enabled
@@ -971,19 +998,20 @@ type MCPServerConfig struct {
 type MCPConfig struct {
 	ToolConfig `                    envPrefix:"PICOCLAW_TOOLS_MCP_"`
 	Discovery  ToolDiscoveryConfig `                                json:"discovery"`
-	// MaxInlineTextChars controls how much MCP text stays inline before it is saved as an artifact.
+	// MaxInlineTextChars limits how much plain text an MCP tool can inline into a tool result.
 	MaxInlineTextChars int `json:"max_inline_text_chars,omitempty" env:"PICOCLAW_TOOLS_MCP_MAX_INLINE_TEXT_CHARS"`
 	// Servers is a map of server name to server configuration
 	Servers map[string]MCPServerConfig `json:"servers,omitempty"`
 }
 
-const DefaultMCPMaxInlineTextChars = 16 * 1024
+const DefaultMCPMaxInlineTextChars = 4096
 
+// GetMaxInlineTextChars returns the inline text budget for MCP tool responses.
 func (c *MCPConfig) GetMaxInlineTextChars() int {
-	if c.MaxInlineTextChars > 0 {
-		return c.MaxInlineTextChars
+	if c == nil || c.MaxInlineTextChars <= 0 {
+		return DefaultMCPMaxInlineTextChars
 	}
-	return DefaultMCPMaxInlineTextChars
+	return c.MaxInlineTextChars
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -1295,6 +1323,9 @@ func (c *Config) ValidateRouting() error {
 		return nil
 	}
 
+	if err := validateTierRef("free_tier", rc.FreeTier); err != nil {
+		return err
+	}
 	if err := validateTierRef("paid_tier", rc.PaidTier); err != nil {
 		return err
 	}
@@ -1398,6 +1429,8 @@ func (t *ToolsConfig) IsToolEnabled(name string) bool {
 		return t.Git.Enabled
 	case "github":
 		return t.Github.Enabled
+	case "home_assistant":
+		return t.HomeAssistant.Enabled
 	case "skills":
 		return t.Skills.Enabled
 	case "media_cleanup":

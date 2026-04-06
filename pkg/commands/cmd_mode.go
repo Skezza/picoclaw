@@ -60,6 +60,32 @@ func paidCommand() Definition {
 	}
 }
 
+func freeCommand() Definition {
+	return Definition{
+		Name:        "free",
+		Description: "Use the manual free tier for this session",
+		Usage:       "/free",
+		Handler: func(_ context.Context, req Request, rt *Runtime) error {
+			targets := sessionModeTargets(rt)
+			if targets.Free.Target == "" {
+				return req.Reply("Free mode unavailable: free tier is not configured.")
+			}
+			if rt == nil || rt.SetSessionModelMode == nil {
+				return req.Reply(unavailableMsg)
+			}
+			if err := rt.SetSessionModelMode(targets.Free.Target); err != nil {
+				return req.Reply(err.Error())
+			}
+			if rt.ClearSessionWorkMode != nil {
+				if err := rt.ClearSessionWorkMode(); err != nil {
+					return req.Reply(err.Error())
+				}
+			}
+			return req.Reply(fmt.Sprintf("Session mode set to free (%s).", targets.Free.Label))
+		},
+	}
+}
+
 func codeCommand() Definition {
 	return Definition{
 		Name:        "code",
@@ -185,6 +211,9 @@ func statusCommand() Definition {
 			if targets.Tools.Label != "" {
 				lines = append(lines, fmt.Sprintf("Tools Model: %s", targets.Tools.Label))
 			}
+			if targets.Free.Label != "" {
+				lines = append(lines, fmt.Sprintf("Free Model: %s", targets.Free.Label))
+			}
 			return req.Reply(strings.Join(lines, "\n"))
 		},
 	}
@@ -200,6 +229,7 @@ type sessionTargets struct {
 	Fast  sessionModeTarget
 	Heavy sessionModeTarget
 	Tools sessionModeTarget
+	Free  sessionModeTarget
 }
 
 func sessionModeTargets(rt *Runtime) sessionTargets {
@@ -228,6 +258,11 @@ func sessionModeTargets(rt *Runtime) sessionTargets {
 			targets.Tools = targets.Heavy
 			targets.Tools.Name = "tools"
 		}
+		if tierName, tierLabel := preferredRoutingTier(rc, "free"); tierName != "" && tierLabel != "" {
+			targets.Free = sessionModeTarget{Name: "free", Target: "tier:" + tierName, Label: tierLabel}
+		} else if free := strings.TrimSpace(rc.LightModel); free != "" {
+			targets.Free = sessionModeTarget{Name: "free", Target: free, Label: free}
+		}
 	}
 	return targets
 }
@@ -244,6 +279,11 @@ func preferredRoutingTier(rc *config.RoutingConfig, modes ...string) (name, labe
 			target = strings.TrimSpace(rc.PaidTier)
 			if target == "" {
 				target = "paid"
+			}
+		case "free":
+			target = strings.TrimSpace(rc.FreeTier)
+			if target == "" {
+				target = "free"
 			}
 		case "fast", "heavy", "tools":
 			target = strings.TrimSpace(mode)
@@ -284,6 +324,9 @@ func sessionModeDescription(persistent, pending, workMode string, targets sessio
 	if targets.Tools.Target != "" && strings.EqualFold(persistent, targets.Tools.Target) {
 		return fmt.Sprintf("tools (%s)", targets.Tools.Label)
 	}
+	if targets.Free.Target != "" && strings.EqualFold(persistent, targets.Free.Target) {
+		return fmt.Sprintf("free (%s)", targets.Free.Label)
+	}
 	return fmt.Sprintf("custom (%s)", sessionModeLabel(persistent, targets))
 }
 
@@ -294,6 +337,8 @@ func sessionModeLabel(value string, targets sessionTargets) string {
 		return targets.Heavy.Label
 	case targets.Tools.Target != "" && strings.EqualFold(value, targets.Tools.Target):
 		return targets.Tools.Label
+	case targets.Free.Target != "" && strings.EqualFold(value, targets.Free.Target):
+		return targets.Free.Label
 	case targets.Fast.Target != "" && strings.EqualFold(value, targets.Fast.Target):
 		return targets.Fast.Label
 	default:

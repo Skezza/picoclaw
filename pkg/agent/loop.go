@@ -1455,12 +1455,7 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 			if !al.hasCodexApprovalPending(opts.SessionKey) {
 				return "No codex plan is awaiting approval yet. Keep chatting in /codex until I ask you to reply `proceed`.", nil
 			}
-			approvedPlanID, approvedPlanHash, approvedPlanText, err := al.currentApprovedCodexPlan(opts.SessionKey, agent.Sessions.GetHistory(opts.SessionKey))
-			if err != nil {
-				al.clearCodexApprovalPending(opts.SessionKey)
-				return err.Error(), nil
-			}
-			response, err := al.startApprovedCodexRun(ctx, agent, &opts, approvalMessage, approvedPlanID, approvedPlanHash, approvedPlanText)
+			response, err := al.startApprovedCodexRun(ctx, agent, &opts, approvalMessage)
 			if err != nil {
 				return "", err
 			}
@@ -1824,17 +1819,19 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState) (turnResult, er
 	messages = resolveMediaRefs(messages, al.mediaStore, maxMediaSize)
 	workMode := al.getSessionWorkMode(ts.sessionKey)
 	var activeCodex *commands.CodexSessionInfo
+	var codexDelegateTargets []string
 	var codexRepoTargets []string
 	if workMode != "" {
 		if isCodexWorkMode(workMode) {
 			if info, ok := al.codexActiveRuntimeInfo(ts.sessionKey); ok {
 				activeCodex = info
 			}
+			codexDelegateTargets = al.codexDelegateTargets(cfg)
 			if repos, err := al.codexGitHubRepos(10); err == nil {
 				codexRepoTargets = repos
 			}
 		}
-		messages = injectWorkModePrompt(messages, workMode, ts.agent.Workspace, activeCodex, codexRepoTargets)
+		messages = injectWorkModePrompt(messages, workMode, ts.agent.Workspace, activeCodex, codexDelegateTargets, codexRepoTargets)
 	}
 
 	if !ts.opts.NoHistory {
@@ -1845,7 +1842,6 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState) (turnResult, er
 			if err := al.contextManager.Compact(turnCtx, &CompactRequest{
 				SessionKey: ts.sessionKey,
 				Reason:     ContextCompressReasonProactive,
-				Budget:     ts.agent.ContextWindow,
 			}); err != nil {
 				logger.WarnCF("agent", "Proactive compact failed", map[string]any{
 					"session_key": ts.sessionKey,
@@ -1870,7 +1866,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState) (turnResult, er
 			)
 			messages = resolveMediaRefs(messages, al.mediaStore, maxMediaSize)
 			if workMode != "" {
-				messages = injectWorkModePrompt(messages, workMode, ts.agent.Workspace, activeCodex, codexRepoTargets)
+				messages = injectWorkModePrompt(messages, workMode, ts.agent.Workspace, activeCodex, codexDelegateTargets, codexRepoTargets)
 			}
 		}
 	}
@@ -2289,7 +2285,6 @@ turnLoop:
 				if compactErr := al.contextManager.Compact(turnCtx, &CompactRequest{
 					SessionKey: ts.sessionKey,
 					Reason:     ContextCompressReasonRetry,
-					Budget:     ts.agent.ContextWindow,
 				}); compactErr != nil {
 					logger.WarnCF("agent", "Context overflow compact failed", map[string]any{
 						"session_key": ts.sessionKey,
@@ -2935,7 +2930,7 @@ turnLoop:
 				}
 			}
 			if ts.opts.EnableSummary {
-				al.contextManager.Compact(turnCtx, &CompactRequest{SessionKey: ts.sessionKey, Reason: ContextCompressReasonSummarize, Budget: ts.agent.ContextWindow})
+				al.contextManager.Compact(turnCtx, &CompactRequest{SessionKey: ts.sessionKey, Reason: ContextCompressReasonSummarize})
 			}
 
 			ts.setPhase(TurnPhaseCompleted)
@@ -3018,7 +3013,6 @@ turnLoop:
 			&CompactRequest{
 				SessionKey: ts.sessionKey,
 				Reason:     ContextCompressReasonSummarize,
-				Budget:     ts.agent.ContextWindow,
 			},
 		)
 	}
@@ -3064,21 +3058,68 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 func workModePrompt(
 	workMode, workspace string,
 	activeCodex *commands.CodexSessionInfo,
+	delegateTargets []string,
 	repoTargets []string,
 ) string {
-	switch normalizeCodexWorkMode(workMode) {
+	switch strings.ToLower(strings.TrimSpace(workMode)) {
 	case "code":
 		return strings.TrimSpace(fmt.Sprintf(`## Code Mode
-	You are in code mode. The user wants PicoClaw improved through repository changes, config updates, or new integrations.
+You are in code mode. The user wants PicoClaw improved through repository changes, config updates, or new integrations.
 
 Prioritize implementation over discussion when the request is actionable.
 - Prefer using tools to inspect the repository, edit files, run tests, and inspect git state.
 - If the task can benefit from independent work, spawn a paid subagent for the implementation or verification step.
 - Keep changes scoped and explain the exact files, commands, and validation steps you used.
 - When editing config or adding integrations, prefer explicit, reviewable changes in the workspace.
-	- If the request is risky or ambiguous, surface the risk and ask for confirmation before making destructive changes.
+- If the request is risky or ambiguous, surface the risk and ask for confirmation before making destructive changes.
 
-	Workspace root: %s`, workspace))
+Workspace root: %s`, workspace))
+	case "codex":
+		repoPath := workspace
+		repoSlug := ""
+		repoURL := ""
+		if activeCodex != nil {
+			if strings.TrimSpace(activeCodex.RepoPath) != "" {
+				repoPath = strings.TrimSpace(activeCodex.RepoPath)
+			}
+			repoSlug = strings.TrimSpace(activeCodex.Slug)
+			repoURL = strings.TrimSpace(activeCodex.RepoURL)
+		}
+
+		extra := ""
+		if repoSlug != "" {
+			extra += "\nCodex Session: " + repoSlug
+		}
+		if repoURL != "" {
+			extra += "\nRepo Remote: " + repoURL
+		}
+		if len(delegateTargets) > 0 {
+			limit := len(delegateTargets)
+			if limit > 12 {
+				limit = 12
+			}
+			extra += "\nDelegation targets: " + strings.Join(delegateTargets[:limit], ", ")
+		}
+		if len(repoTargets) > 0 {
+			limit := len(repoTargets)
+			if limit > 12 {
+				limit = 12
+			}
+			extra += "\nGitHub repos available: " + strings.Join(repoTargets[:limit], ", ")
+		}
+		return strings.TrimSpace(fmt.Sprintf(`## Codex Mode
+You are in codex mode. Treat this as a long-running repository session and keep execution conversational.
+
+Prioritize implementation and verification.
+- Work inside the active repo path for all file/tool operations unless the user explicitly asks otherwise.
+- Filesystem tools are workspace-scoped; never write to absolute system paths like /tmp, /etc, or /usr.
+- Put transient artifacts under the active repo (for example ./.tmp/) instead of system temp directories.
+- Keep commits scoped and reversible; do not rewrite history unless the user asks.
+- If auth is needed for git operations, ask for setup steps without exposing any secrets.
+- For PicoClaw self-updates, run focused tests/build first, then restart the user service and verify health.
+- Keep a short running summary of what changed so the user can resume the session later.
+
+Active repo path: %s%s`, repoPath, extra))
 	case "codex-plan":
 		repoPath := workspace
 		repoSlug := ""
@@ -3097,6 +3138,13 @@ Prioritize implementation over discussion when the request is actionable.
 		}
 		if repoURL != "" {
 			extra += "\nRepo Remote: " + repoURL
+		}
+		if len(delegateTargets) > 0 {
+			limit := len(delegateTargets)
+			if limit > 12 {
+				limit = 12
+			}
+			extra += "\nDelegation targets: " + strings.Join(delegateTargets[:limit], ", ")
 		}
 		if len(repoTargets) > 0 {
 			limit := len(repoTargets)
@@ -3136,15 +3184,8 @@ Workspace root: %s`, workspace))
 }
 
 func isCodexWorkMode(mode string) bool {
-	return normalizeCodexWorkMode(mode) == "codex-plan"
-}
-
-func normalizeCodexWorkMode(mode string) string {
 	mode = strings.ToLower(strings.TrimSpace(mode))
-	if mode == "codex" {
-		return "codex-plan"
-	}
-	return mode
+	return mode == "codex" || mode == "codex-plan"
 }
 
 func isCodexPlanningMode(mode string) bool {
@@ -3248,9 +3289,10 @@ func injectWorkModePrompt(
 	messages []providers.Message,
 	workMode, workspace string,
 	activeCodex *commands.CodexSessionInfo,
+	delegateTargets []string,
 	repoTargets []string,
 ) []providers.Message {
-	instruction := workModePrompt(workMode, workspace, activeCodex, repoTargets)
+	instruction := workModePrompt(workMode, workspace, activeCodex, delegateTargets, repoTargets)
 	if instruction == "" || len(messages) == 0 {
 		return messages
 	}
@@ -3822,6 +3864,9 @@ func (al *AgentLoop) buildCommandsRuntime(agent *AgentInstance, opts *processOpt
 		rt.FindCodexModel = func() string {
 			return al.findCodexModelName(cfg)
 		}
+		rt.ListCodexDelegateTargets = func() []string {
+			return al.codexDelegateTargets(cfg)
+		}
 		rt.ListCodexRepoTargets = func(limit int) ([]string, error) {
 			return al.codexGitHubRepos(limit)
 		}
@@ -3978,6 +4023,47 @@ func (al *AgentLoop) buildCommandsRuntime(agent *AgentInstance, opts *processOpt
 			al.clearPendingModelOverride(opts.SessionKey)
 			return nil
 		}
+		rt.CodexStop = func() error {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return fmt.Errorf("codex sessions unavailable in current context")
+			}
+			if al.codexStore != nil {
+				if err := al.codexStore.Stop(opts.SessionKey); err != nil {
+					return err
+				}
+			}
+			al.clearSessionWorkMode(opts.SessionKey)
+			al.clearCodexApprovalPending(opts.SessionKey)
+			al.clearSessionModelOverride(opts.SessionKey)
+			al.clearPendingModelOverride(opts.SessionKey)
+			return nil
+		}
+		rt.ListSelfImproveTargets = func() []string {
+			return al.selfImproveTargets(cfg)
+		}
+		rt.SelfImproveActivate = func() (*commands.CodexSessionInfo, error) {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return nil, fmt.Errorf("self-improve unavailable in current context")
+			}
+			rec, err := al.ensureSelfImproveSession(opts.SessionKey, cfg, agent)
+			if err != nil {
+				return nil, err
+			}
+			info := codexRecordToInfo(rec, true)
+			return &info, nil
+		}
+		rt.SelfImproveStatus = func() (string, error) {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return "", fmt.Errorf("self-improve unavailable in current context")
+			}
+			return al.selfImproveStatus(opts.SessionKey, cfg, agent)
+		}
+		rt.SelfImproveShip = func(target string) (string, error) {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return "", fmt.Errorf("self-improve unavailable in current context")
+			}
+			return al.selfImproveShip(opts.SessionKey, cfg, agent, target)
+		}
 
 		rt.ClearHistory = func() error {
 			if opts == nil {
@@ -4075,7 +4161,7 @@ func (al *AgentLoop) clearSessionModelOverride(sessionKey string) {
 
 func (al *AgentLoop) setSessionWorkMode(sessionKey, workMode string) {
 	sessionKey = strings.TrimSpace(sessionKey)
-	workMode = normalizeCodexWorkMode(workMode)
+	workMode = strings.TrimSpace(workMode)
 	if sessionKey == "" {
 		return
 	}
@@ -4121,12 +4207,12 @@ func (al *AgentLoop) getSessionWorkMode(sessionKey string) string {
 		if !ok {
 			return ""
 		}
-		return normalizeCodexWorkMode(workMode)
+		return strings.TrimSpace(workMode)
 	}
 	if al != nil && al.codexStore != nil {
 		if runtime, ok := al.codexStore.SessionRuntime(sessionKey); ok {
 			if workMode := strings.TrimSpace(runtime.WorkMode); workMode != "" {
-				return normalizeCodexWorkMode(workMode)
+				return workMode
 			}
 		}
 		if _, active := al.codexStore.Active(sessionKey); active {
@@ -4196,29 +4282,6 @@ func (al *AgentLoop) setCodexApprovalState(sessionKey string, pending bool, plan
 			runtime.PendingPlanHash = planHash
 		})
 	}
-}
-
-func (al *AgentLoop) currentApprovedCodexPlan(sessionKey string, history []providers.Message) (string, string, string, error) {
-	sessionKey = strings.TrimSpace(sessionKey)
-	if sessionKey == "" || al == nil || al.codexStore == nil {
-		return "", "", "", fmt.Errorf("The pending codex plan could not be verified. Ask me to restate the plan, then reply `proceed` again.")
-	}
-	runtime, ok := al.codexStore.SessionRuntime(sessionKey)
-	if !ok || !runtime.ApprovalPending {
-		return "", "", "", fmt.Errorf("No codex plan is awaiting approval yet. Keep chatting in /codex until I ask you to reply `proceed`.")
-	}
-
-	planText := latestAssistantMessage(history)
-	if strings.TrimSpace(planText) == "" {
-		return "", "", "", fmt.Errorf("The pending codex plan could not be verified. Ask me to restate the plan, then reply `proceed` again.")
-	}
-
-	planID, planHash := codexPlanIdentity(planText)
-	if planHash == "" || strings.TrimSpace(runtime.PendingPlanHash) == "" || !strings.EqualFold(strings.TrimSpace(runtime.PendingPlanHash), planHash) {
-		return "", "", "", fmt.Errorf("The pending codex plan no longer matches the latest planner reply. Review the latest plan and reply `proceed` again.")
-	}
-
-	return planID, planHash, planText, nil
 }
 
 func (al *AgentLoop) hasCodexApprovalPending(sessionKey string) bool {
