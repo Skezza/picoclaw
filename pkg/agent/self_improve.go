@@ -292,6 +292,10 @@ func validateSelfImproveWorktree(worktree string) error {
 	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
 		return err
 	}
+	cacheDir := filepath.Join(tmpDir, "cache")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return err
+	}
 
 	goBin, err := resolveSelfImproveBinary("go")
 	if err != nil {
@@ -311,7 +315,14 @@ func validateSelfImproveWorktree(worktree string) error {
 	for _, step := range steps {
 		cmd := exec.CommandContext(ctx, step[0], step[1:]...)
 		cmd.Dir = worktree
-		cmd.Env = append(baseEnv, "GIT_TERMINAL_PROMPT=0", "CGO_ENABLED=0")
+		cmd.Env = append(
+			baseEnv,
+			"GIT_TERMINAL_PROMPT=0",
+			"CGO_ENABLED=0",
+			"TMPDIR="+tmpDir,
+			"GOCACHE="+filepath.Join(cacheDir, "go-build"),
+			"GOMODCACHE="+filepath.Join(cacheDir, "pkg", "mod"),
+		)
 		if output, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("%s failed: %w: %s", strings.Join(step, " "), err, strings.TrimSpace(string(output)))
 		}

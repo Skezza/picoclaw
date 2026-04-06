@@ -35,6 +35,11 @@ fi
 
 mkdir -p "$INSTALL_ROOT" "$BIN_DIR" "$RELEASES_ROOT"
 export PATH="$HOME/.local/bin:${PATH:-}"
+build_cache_root="${PICOCLAW_HOME}/build-cache"
+mkdir -p "$build_cache_root/tmp" "$build_cache_root/go-build" "$build_cache_root/pkg/mod"
+export TMPDIR="$build_cache_root/tmp"
+export GOCACHE="$build_cache_root/go-build"
+export GOMODCACHE="$build_cache_root/pkg/mod"
 
 sha="$(git -C "$SRC_DIR" rev-parse --short=12 HEAD)"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
