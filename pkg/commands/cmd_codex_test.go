@@ -447,28 +447,6 @@ func TestCodexGuide_ContainsPlanAndExecuteFlow(t *testing.T) {
 	}
 }
 
-func TestCodexRemovedLegacyControl_ShowsGuidance(t *testing.T) {
-	rt := &Runtime{
-		FindCodexModel: func() string { return "codex-local" },
-	}
-	ex := NewExecutor(NewRegistry(BuiltinDefinitions()), rt)
-
-	var reply string
-	res := ex.Execute(context.Background(), Request{
-		Text: "/codex execute",
-		Reply: func(text string) error {
-			reply = text
-			return nil
-		},
-	})
-	if res.Outcome != OutcomeHandled {
-		t.Fatalf("outcome=%v, want=%v", res.Outcome, OutcomeHandled)
-	}
-	if reply != "That /codex control was removed. Use /codex and chat normally, or use /codex guide for the supported controls." {
-		t.Fatalf("reply=%q, want removed-control guidance", reply)
-	}
-}
-
 func TestCodexRuns_ListsRuns(t *testing.T) {
 	now := time.Date(2026, 4, 6, 15, 0, 0, 0, time.UTC)
 	rt := &Runtime{

@@ -361,9 +361,6 @@ func handleCodexConversationalEntry(req Request, rt *Runtime) error {
 	}
 
 	intent := codexCommandTail(req.Text)
-	if legacyRemovedCodexControl(intent) {
-		return req.Reply("That /codex control was removed. Use /codex and chat normally, or use /codex guide for the supported controls.")
-	}
 	info, note, err := activateCodexSessionForConversationalEntry(rt, intent)
 	if err != nil {
 		return req.Reply(err.Error())
@@ -400,19 +397,6 @@ func handleCodexConversationalEntry(req Request, rt *Runtime) error {
 		lines = append(lines, `I captured your kickoff request. Send it again without "/codex" and I will use it as the planning brief for this repo session.`)
 	}
 	return req.Reply(strings.Join(lines, "\n"))
-}
-
-func legacyRemovedCodexControl(intent string) bool {
-	intent = strings.TrimSpace(intent)
-	if intent == "" {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(nthToken(intent, 0))) {
-	case "attach", "use", "list", "help", "models", "execute", "delegate":
-		return true
-	default:
-		return false
-	}
 }
 
 func codexExecutorModel(rt *Runtime) string {
