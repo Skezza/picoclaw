@@ -203,8 +203,8 @@ type SessionConfig struct {
 // RoutingTierConfig defines a named tier that routing can select.
 // Tiers are evaluated in order; the first tier whose MaxScore is >= the
 // computed complexity score is selected. A MaxScore of 0 means "catch-all".
-// A MaxScore below 0 marks the tier as manual-only, so commands like /free or
-// /paid can select it without /route ever picking it automatically.
+// A MaxScore below 0 marks the tier as manual-only, so an explicit session-mode
+// command can select it without /route ever picking it automatically.
 type RoutingTierConfig struct {
 	Name     string            `json:"name"`
 	MaxScore float64           `json:"max_score,omitempty"`

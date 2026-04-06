@@ -276,8 +276,8 @@ func TestDefaultConfig_TieredRoutingHydrated(t *testing.T) {
 	if !rt.Enabled {
 		t.Fatal("DefaultConfig().Agents.Defaults.Routing.Enabled should be true")
 	}
-	if rt.FreeTier != "free" {
-		t.Fatalf("DefaultConfig().Agents.Defaults.Routing.FreeTier = %q, want %q", rt.FreeTier, "free")
+	if rt.FreeTier != "" {
+		t.Fatalf("DefaultConfig().Agents.Defaults.Routing.FreeTier = %q, want empty", rt.FreeTier)
 	}
 	if rt.PaidTier != "heavy" {
 		t.Fatalf("DefaultConfig().Agents.Defaults.Routing.PaidTier = %q, want %q", rt.PaidTier, "heavy")
@@ -302,11 +302,6 @@ func TestDefaultConfig_TieredRoutingHydrated(t *testing.T) {
 			maxScore:  0,
 			primary:   "gpt-5-mini",
 			fallbacks: []string{"gpt-5.4-mini"},
-		},
-		"free": {
-			maxScore:  -1,
-			primary:   "openrouter-free-qwen",
-			fallbacks: []string{"openrouter-free-oss", "openrouter-free-step"},
 		},
 	}
 
@@ -342,13 +337,10 @@ func TestDefaultConfig_TieredModelAliasesPresent(t *testing.T) {
 	cfg := DefaultConfig()
 
 	expectedModels := map[string]string{
-		"gpt-5.4-mini":         "openai/gpt-5.4-mini",
-		"gpt-5-mini":           "openai/gpt-5-mini",
-		"gpt-5.4-nano":         "openai/gpt-5.4-nano",
-		"gpt-5-nano":           "openai/gpt-5-nano",
-		"openrouter-free-qwen": "openrouter/qwen/qwen3-next-80b-a3b-instruct:free",
-		"openrouter-free-oss":  "openrouter/openai/gpt-oss-20b:free",
-		"openrouter-free-step": "openrouter/stepfun/step-3.5-flash:free",
+		"gpt-5.4-mini": "openai/gpt-5.4-mini",
+		"gpt-5-mini":   "openai/gpt-5-mini",
+		"gpt-5.4-nano": "openai/gpt-5.4-nano",
+		"gpt-5-nano":   "openai/gpt-5-nano",
 	}
 
 	modelsByName := make(map[string]*ModelConfig, len(cfg.ModelList))

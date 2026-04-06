@@ -60,32 +60,6 @@ func paidCommand() Definition {
 	}
 }
 
-func freeCommand() Definition {
-	return Definition{
-		Name:        "free",
-		Description: "Use the manual free tier for this session",
-		Usage:       "/free",
-		Handler: func(_ context.Context, req Request, rt *Runtime) error {
-			targets := sessionModeTargets(rt)
-			if targets.Free.Target == "" {
-				return req.Reply("Free mode unavailable: free tier is not configured.")
-			}
-			if rt == nil || rt.SetSessionModelMode == nil {
-				return req.Reply(unavailableMsg)
-			}
-			if err := rt.SetSessionModelMode(targets.Free.Target); err != nil {
-				return req.Reply(err.Error())
-			}
-			if rt.ClearSessionWorkMode != nil {
-				if err := rt.ClearSessionWorkMode(); err != nil {
-					return req.Reply(err.Error())
-				}
-			}
-			return req.Reply(fmt.Sprintf("Session mode set to free (%s).", targets.Free.Label))
-		},
-	}
-}
-
 func codeCommand() Definition {
 	return Definition{
 		Name:        "code",

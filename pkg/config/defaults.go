@@ -31,7 +31,6 @@ func DefaultConfig() *Config {
 				SummarizeTokenPercent:     75,
 				Routing: &RoutingConfig{
 					Enabled:  true,
-					FreeTier: "free",
 					PaidTier: "heavy",
 					Tiers: []RoutingTierConfig{
 						{
@@ -54,14 +53,6 @@ func DefaultConfig() *Config {
 							Model: &AgentModelConfig{
 								Primary:   "gpt-5-mini",
 								Fallbacks: []string{"gpt-5.4-mini"},
-							},
-						},
-						{
-							Name:     "free",
-							MaxScore: -1,
-							Model: &AgentModelConfig{
-								Primary:   "openrouter-free-qwen",
-								Fallbacks: []string{"openrouter-free-oss", "openrouter-free-step"},
 							},
 						},
 					},
@@ -290,22 +281,6 @@ func DefaultConfig() *Config {
 				Model:     "openrouter/openai/gpt-5.4",
 				APIBase:   "https://openrouter.ai/api/v1",
 			},
-			{
-				ModelName: "openrouter-free-qwen",
-				Model:     "openrouter/qwen/qwen3-next-80b-a3b-instruct:free",
-				APIBase:   "https://openrouter.ai/api/v1",
-			},
-			{
-				ModelName: "openrouter-free-oss",
-				Model:     "openrouter/openai/gpt-oss-20b:free",
-				APIBase:   "https://openrouter.ai/api/v1",
-			},
-			{
-				ModelName: "openrouter-free-step",
-				Model:     "openrouter/stepfun/step-3.5-flash:free",
-				APIBase:   "https://openrouter.ai/api/v1",
-			},
-
 			// NVIDIA - https://build.nvidia.com/
 			{
 				ModelName: "nemotron-4-340b",

@@ -15,7 +15,6 @@ func newModeTestRuntime() *Runtime {
 				Defaults: config.AgentDefaults{
 					ModelName: "gpt-5-mini",
 					Routing: &config.RoutingConfig{
-						FreeTier: "free",
 						PaidTier: "heavy",
 						Tiers: []config.RoutingTierConfig{
 							{
@@ -34,12 +33,6 @@ func newModeTestRuntime() *Runtime {
 								Name: "heavy",
 								Model: &config.AgentModelConfig{
 									Primary: "gpt-5-mini",
-								},
-							},
-							{
-								Name: "free",
-								Model: &config.AgentModelConfig{
-									Primary: "openrouter-free",
 								},
 							},
 						},
@@ -152,43 +145,6 @@ func TestCodeCommand_SetsWorkModeAndPaidModel(t *testing.T) {
 	}
 }
 
-func TestFreeCommand_SetsPersistentModel(t *testing.T) {
-	rt := newModeTestRuntime()
-	var persistent string
-	workMode := "code"
-	rt.SetSessionModelMode = func(value string) error {
-		persistent = value
-		return nil
-	}
-	rt.ClearSessionWorkMode = func() error {
-		workMode = ""
-		return nil
-	}
-
-	ex := NewExecutor(NewRegistry(BuiltinDefinitions()), rt)
-
-	var reply string
-	res := ex.Execute(context.Background(), Request{
-		Text: "/free",
-		Reply: func(text string) error {
-			reply = text
-			return nil
-		},
-	})
-	if res.Outcome != OutcomeHandled {
-		t.Fatalf("outcome=%v, want=%v", res.Outcome, OutcomeHandled)
-	}
-	if persistent != "tier:free" {
-		t.Fatalf("persistent=%q, want %q", persistent, "tier:free")
-	}
-	if workMode != "" {
-		t.Fatalf("workMode=%q, want cleared", workMode)
-	}
-	if reply != "Session mode set to free (openrouter-free)." {
-		t.Fatalf("reply=%q, want free confirmation", reply)
-	}
-}
-
 func TestSessionModeTargets_DefaultConfigAlignsWithRoutingDefaults(t *testing.T) {
 	rt := &Runtime{Config: config.DefaultConfig()}
 
@@ -203,14 +159,14 @@ func TestSessionModeTargets_DefaultConfigAlignsWithRoutingDefaults(t *testing.T)
 	if targets.Heavy.Target != "tier:heavy" || targets.Heavy.Label != "gpt-5-mini" {
 		t.Fatalf("heavy=%+v, want tier:heavy / gpt-5-mini", targets.Heavy)
 	}
-	if targets.Free.Target != "tier:free" || targets.Free.Label != "openrouter-free-qwen" {
-		t.Fatalf("free=%+v, want tier:free / openrouter-free-qwen", targets.Free)
+	if targets.Free.Target != "" || targets.Free.Label != "" {
+		t.Fatalf("free=%+v, want empty free target in defaults", targets.Free)
 	}
 }
 
 func TestDefaultCommand_ClearsSessionModel(t *testing.T) {
 	rt := newModeTestRuntime()
-	persistent := "tier:free"
+	persistent := "tier:heavy"
 	pending := "tier:heavy"
 	workMode := "code"
 	rt.GetSessionModelMode = func() (string, string) {
@@ -308,7 +264,6 @@ func TestStatusCommand_ReportsPendingBoost(t *testing.T) {
 		"Fast Model: gpt-5.4-nano",
 		"Heavy Model: gpt-5-mini",
 		"Tools Model: gpt-5.4-mini",
-		"Free Model: openrouter-free",
 	}) {
 		t.Fatalf("reply=%q, missing expected status content", reply)
 	}

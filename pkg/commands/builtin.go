@@ -14,7 +14,6 @@ func BuiltinDefinitions() []Definition {
 		switchCommand(),
 		boostCommand(),
 		paidCommand(),
-		freeCommand(),
 		codeCommand(),
 		codexCommand(),
 		routeCommand(),
