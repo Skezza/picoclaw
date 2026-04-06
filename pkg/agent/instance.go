@@ -133,6 +133,19 @@ func NewAgentInstance(
 			toolsRegistry.Register(githubTool)
 		}
 	}
+	if cfg.Tools.IsToolEnabled("home_assistant") {
+		haTool, err := tools.NewHomeAssistantTool(
+			cfg.Tools.HomeAssistant.BaseURL,
+			cfg.Tools.HomeAssistant.Token.String(),
+			cfg.Tools.HomeAssistant.TimeoutSeconds,
+		)
+		if err != nil {
+			logger.ErrorCF("agent", "Failed to initialize home_assistant tool; continuing without home_assistant",
+				map[string]any{"error": err.Error()})
+		} else {
+			toolsRegistry.Register(haTool)
+		}
+	}
 
 	if cfg.Tools.IsToolEnabled("edit_file") {
 		toolsRegistry.Register(tools.NewEditFileTool(workspace, restrict, allowWritePaths))
@@ -227,6 +240,11 @@ func NewAgentInstance(
 		if legacyLight := routeTiers["light"]; legacyLight != nil {
 			lightCandidates = legacyLight.Candidates
 			lightProvider = legacyLight.Provider
+		} else if freeTier := strings.TrimSpace(defaults.Routing.FreeTier); freeTier != "" {
+			if resolved := routeTiers[freeTier]; resolved != nil {
+				lightCandidates = resolved.Candidates
+				lightProvider = resolved.Provider
+			}
 		}
 	}
 

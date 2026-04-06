@@ -29,8 +29,36 @@ func DefaultConfig() *Config {
 				MaxToolIterations:         50,
 				SummarizeMessageThreshold: 20,
 				SummarizeTokenPercent:     75,
-				Routing:                   nil,
-				SteeringMode:              "one-at-a-time",
+				Routing: &RoutingConfig{
+					Enabled:    true,
+					LightModel: "openrouter-free-qwen",
+					PaidTier:   "heavy",
+					Tiers: []RoutingTierConfig{
+						{
+							Name:     "fast",
+							MaxScore: 0.20,
+							Model: &AgentModelConfig{
+								Primary:   "gpt-5.4-nano",
+								Fallbacks: []string{"gpt-5-nano"},
+							},
+						},
+						{
+							Name: "tools",
+							Model: &AgentModelConfig{
+								Primary:   "gpt-5.4-mini",
+								Fallbacks: []string{"gpt-5-mini"},
+							},
+						},
+						{
+							Name: "heavy",
+							Model: &AgentModelConfig{
+								Primary:   "gpt-5-mini",
+								Fallbacks: []string{"gpt-5.4-mini"},
+							},
+						},
+					},
+				},
+				SteeringMode: "one-at-a-time",
 				ToolFeedback: ToolFeedbackConfig{
 					Enabled:       false,
 					MaxArgsLength: 300,
@@ -155,6 +183,13 @@ func DefaultConfig() *Config {
 				ApprovalTimeoutMS:    60000,
 			},
 		},
+		SelfImprove: SelfImproveConfig{
+			Enabled:             false,
+			Repo:                "",
+			SSHPreferred:        true,
+			PublishBranchPrefix: "self-improve",
+			Targets:             map[string]SelfImproveTargetConfig{},
+		},
 		ModelList: []*ModelConfig{
 			// ============================================
 			// Add your API key to the model you want to use
@@ -234,6 +269,33 @@ func DefaultConfig() *Config {
 				ModelName: "llama-3.3-70b",
 				Model:     "groq/llama-3.3-70b-versatile",
 				APIBase:   "https://api.groq.com/openai/v1",
+			},
+
+			// OpenRouter (100+ models) - https://openrouter.ai/keys
+			{
+				ModelName: "openrouter-auto",
+				Model:     "openrouter/auto",
+				APIBase:   "https://openrouter.ai/api/v1",
+			},
+			{
+				ModelName: "openrouter-gpt-5.4",
+				Model:     "openrouter/openai/gpt-5.4",
+				APIBase:   "https://openrouter.ai/api/v1",
+			},
+			{
+				ModelName: "openrouter-free-qwen",
+				Model:     "openrouter/qwen/qwen3-next-80b-a3b-instruct:free",
+				APIBase:   "https://openrouter.ai/api/v1",
+			},
+			{
+				ModelName: "openrouter-free-oss",
+				Model:     "openrouter/openai/gpt-oss-20b:free",
+				APIBase:   "https://openrouter.ai/api/v1",
+			},
+			{
+				ModelName: "openrouter-free-step",
+				Model:     "openrouter/stepfun/step-3.5-flash:free",
+				APIBase:   "https://openrouter.ai/api/v1",
 			},
 
 			// NVIDIA - https://build.nvidia.com/
@@ -446,6 +508,13 @@ func DefaultConfig() *Config {
 				BaseURL:        "https://api.github.com",
 				TimeoutSeconds: 20,
 			},
+			HomeAssistant: HomeAssistantToolsConfig{
+				ToolConfig: ToolConfig{
+					Enabled: false,
+				},
+				BaseURL:        "http://127.0.0.1:8123",
+				TimeoutSeconds: 15,
+			},
 			Skills: SkillsToolsConfig{
 				ToolConfig: ToolConfig{
 					Enabled: true,
@@ -472,6 +541,7 @@ func DefaultConfig() *Config {
 				ToolConfig: ToolConfig{
 					Enabled: false,
 				},
+				MaxInlineTextChars: DefaultMCPMaxInlineTextChars,
 				Discovery: ToolDiscoveryConfig{
 					Enabled:          false,
 					TTL:              5,
@@ -479,8 +549,7 @@ func DefaultConfig() *Config {
 					UseBM25:          true,
 					UseRegex:         false,
 				},
-				MaxInlineTextChars: DefaultMCPMaxInlineTextChars,
-				Servers:            map[string]MCPServerConfig{},
+				Servers: map[string]MCPServerConfig{},
 			},
 			AppendFile: ToolConfig{
 				Enabled: true,

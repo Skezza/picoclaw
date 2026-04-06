@@ -34,6 +34,32 @@ func boostCommand() Definition {
 	}
 }
 
+func freeCommand() Definition {
+	return Definition{
+		Name:        "free",
+		Description: "Use the manual free tier for this session",
+		Usage:       "/free",
+		Handler: func(_ context.Context, req Request, rt *Runtime) error {
+			targets := sessionModeTargets(rt)
+			if targets.Free.Target == "" {
+				return req.Reply("Free mode unavailable: free tier is not configured.")
+			}
+			if rt == nil || rt.SetSessionModelMode == nil {
+				return req.Reply(unavailableMsg)
+			}
+			if err := rt.SetSessionModelMode(targets.Free.Target); err != nil {
+				return req.Reply(err.Error())
+			}
+			if rt.ClearSessionWorkMode != nil {
+				if err := rt.ClearSessionWorkMode(); err != nil {
+					return req.Reply(err.Error())
+				}
+			}
+			return req.Reply(fmt.Sprintf("Session mode set to free (%s).", targets.Free.Label))
+		},
+	}
+}
+
 func codeCommand() Definition {
 	return Definition{
 		Name:        "code",
@@ -129,6 +155,9 @@ func statusCommand() Definition {
 			if targets.Boost.Target != "" && targets.Boost.Label != targets.Code.Label {
 				lines = append(lines, fmt.Sprintf("Boost Model: %s", targets.Boost.Label))
 			}
+			if targets.Free.Label != "" {
+				lines = append(lines, fmt.Sprintf("Free Model: %s", targets.Free.Label))
+			}
 			return req.Reply(strings.Join(lines, "\n"))
 		},
 	}
@@ -142,6 +171,7 @@ type sessionModeTarget struct {
 type sessionTargets struct {
 	Code  sessionModeTarget
 	Boost sessionModeTarget
+	Free  sessionModeTarget
 }
 
 func sessionModeTargets(rt *Runtime) sessionTargets {
@@ -167,6 +197,11 @@ func sessionModeTargets(rt *Runtime) sessionTargets {
 		targets.Boost = sessionModeTarget{Target: "gpt-5.4", Label: "gpt-5.4"}
 	} else {
 		targets.Boost = targets.Code
+	}
+	if routing := rt.Config.Agents.Defaults.Routing; routing != nil {
+		if free := strings.TrimSpace(routing.LightModel); free != "" {
+			targets.Free = sessionModeTarget{Target: free, Label: free}
+		}
 	}
 	return targets
 }
@@ -200,6 +235,9 @@ func sessionModeDescription(persistent, pending, workMode string, targets sessio
 	if persistent == "" {
 		return "default"
 	}
+	if targets.Free.Target != "" && strings.EqualFold(persistent, targets.Free.Target) {
+		return fmt.Sprintf("free (%s)", targets.Free.Label)
+	}
 	return fmt.Sprintf("custom (%s)", sessionModeLabel(persistent, targets))
 }
 
@@ -210,6 +248,8 @@ func sessionModeLabel(value string, targets sessionTargets) string {
 		return targets.Boost.Label
 	case targets.Code.Target != "" && strings.EqualFold(value, targets.Code.Target):
 		return targets.Code.Label
+	case targets.Free.Target != "" && strings.EqualFold(value, targets.Free.Target):
+		return targets.Free.Label
 	default:
 		return value
 	}
