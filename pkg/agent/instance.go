@@ -42,15 +42,25 @@ type AgentInstance struct {
 	Candidates                []providers.FallbackCandidate
 
 	// Router is non-nil when model routing is configured and the light model
-	// was successfully resolved. It scores each incoming message and decides
-	// whether to route to LightCandidates or stay with Candidates.
+	// or tier chain was successfully resolved. It scores each incoming message
+	// and decides whether to route to a named tier or stay with Candidates.
 	Router *routing.Router
+	// RouteTiers holds pre-resolved named routing tiers keyed by tier name.
+	RouteTiers map[string]*ResolvedRouteTier
 	// LightCandidates holds the resolved provider candidates for the light model.
-	// Pre-computed at agent creation to avoid repeated model_list lookups at runtime.
+	// Legacy compatibility field for binary routing configs.
 	LightCandidates []providers.FallbackCandidate
 	// LightProvider is the concrete provider instance for the configured light model.
-	// It is only used when routing selects the light tier for a turn.
+	// Legacy compatibility field for binary routing configs.
 	LightProvider providers.LLMProvider
+}
+
+type ResolvedRouteTier struct {
+	Name          string
+	Primary       string
+	Candidates    []providers.FallbackCandidate
+	Provider      providers.LLMProvider
+	ThinkingLevel ThinkingLevel
 }
 
 // NewAgentInstance creates an agent instance from config.
@@ -97,6 +107,30 @@ func NewAgentInstance(
 				map[string]any{"error": err.Error()})
 		} else {
 			toolsRegistry.Register(execTool)
+		}
+	}
+	if cfg.Tools.IsToolEnabled("git") {
+		allowGitPaths := compilePatterns(cfg.Tools.AllowWritePaths)
+		gitTool, err := tools.NewGitTool(workspace, restrict, cfg.Tools.Git.TimeoutSeconds, allowGitPaths)
+		if err != nil {
+			logger.ErrorCF("agent", "Failed to initialize git tool; continuing without git",
+				map[string]any{"error": err.Error()})
+		} else {
+			toolsRegistry.Register(gitTool)
+		}
+	}
+	if cfg.Tools.IsToolEnabled("github") {
+		githubTool, err := tools.NewGitHubTool(
+			cfg.Tools.Github.Token.String(),
+			cfg.Tools.Github.BaseURL,
+			cfg.Tools.Github.Proxy,
+			cfg.Tools.Github.TimeoutSeconds,
+		)
+		if err != nil {
+			logger.ErrorCF("agent", "Failed to initialize github tool; continuing without github",
+				map[string]any{"error": err.Error()})
+		} else {
+			toolsRegistry.Register(githubTool)
 		}
 	}
 
@@ -175,35 +209,29 @@ func NewAgentInstance(
 	// Resolve fallback candidates
 	candidates := resolveModelCandidates(cfg, defaults.Provider, model, fallbacks)
 
-	// Model routing setup: pre-resolve light model candidates at creation time
-	// to avoid repeated model_list lookups on every incoming message.
+	// Model routing setup: pre-resolve routing tiers at creation time to avoid
+	// repeated model_list lookups on every incoming message.
 	var router *routing.Router
+	var routeTiers map[string]*ResolvedRouteTier
 	var lightCandidates []providers.FallbackCandidate
 	var lightProvider providers.LLMProvider
-	if rc := defaults.Routing; rc != nil && rc.Enabled && rc.LightModel != "" {
-		resolved := resolveModelCandidates(cfg, defaults.Provider, rc.LightModel, nil)
-		if len(resolved) > 0 {
-			lightModelCfg, err := resolvedModelConfig(cfg, rc.LightModel, workspace)
-			if err != nil {
-				logger.WarnCF("agent", "Routing light model config invalid; routing disabled",
-					map[string]any{"light_model": rc.LightModel, "agent_id": agentID, "error": err.Error()})
-			} else {
-				lp, _, err := providers.CreateProviderFromConfig(lightModelCfg)
-				if err != nil {
-					logger.WarnCF("agent", "Routing light model provider init failed; routing disabled",
-						map[string]any{"light_model": rc.LightModel, "agent_id": agentID, "error": err.Error()})
-				} else {
-					router = routing.New(routing.RouterConfig{
-						LightModel: rc.LightModel,
-						Threshold:  rc.Threshold,
-					})
-					lightCandidates = resolved
-					lightProvider = lp
-				}
+	if rc := defaults.Routing; rc != nil && rc.Enabled {
+		routeTiers = resolveRouteTiers(cfg, defaults, workspace, agentID, rc)
+		if len(routeTiers) > 0 || rc.LightModel != "" {
+			router = routing.New(routing.RouterConfig{
+				LightModel: rc.LightModel,
+				Threshold:  rc.Threshold,
+				Tiers:      rc.Tiers,
+			})
+		}
+		if legacyLight := routeTiers["light"]; legacyLight != nil {
+			lightCandidates = legacyLight.Candidates
+			lightProvider = legacyLight.Provider
+		} else if freeTier := strings.TrimSpace(defaults.Routing.FreeTier); freeTier != "" {
+			if resolved := routeTiers[freeTier]; resolved != nil {
+				lightCandidates = resolved.Candidates
+				lightProvider = resolved.Provider
 			}
-		} else {
-			logger.WarnCF("agent", "Routing light model not found; routing disabled",
-				map[string]any{"light_model": rc.LightModel, "agent_id": agentID})
 		}
 	}
 
@@ -228,9 +256,79 @@ func NewAgentInstance(
 		SkillsFilter:              skillsFilter,
 		Candidates:                candidates,
 		Router:                    router,
+		RouteTiers:                routeTiers,
 		LightCandidates:           lightCandidates,
 		LightProvider:             lightProvider,
 	}
+}
+
+func resolveRouteTiers(
+	cfg *config.Config,
+	defaults *config.AgentDefaults,
+	workspace, agentID string,
+	rc *config.RoutingConfig,
+) map[string]*ResolvedRouteTier {
+	if cfg == nil || defaults == nil || rc == nil || !rc.Enabled {
+		return nil
+	}
+
+	result := map[string]*ResolvedRouteTier{}
+	addTier := func(name, primary string, fallbacks []string) {
+		name = strings.TrimSpace(name)
+		primary = strings.TrimSpace(primary)
+		if name == "" || primary == "" {
+			return
+		}
+
+		modelCfg, err := resolvedModelConfig(cfg, primary, workspace)
+		if err != nil {
+			logger.WarnCF("agent", "Routing tier model config invalid; tier disabled",
+				map[string]any{"tier": name, "model": primary, "agent_id": agentID, "error": err.Error()})
+			return
+		}
+		provider, _, err := providers.CreateProviderFromConfig(modelCfg)
+		if err != nil {
+			logger.WarnCF("agent", "Routing tier provider init failed; tier disabled",
+				map[string]any{"tier": name, "model": primary, "agent_id": agentID, "error": err.Error()})
+			return
+		}
+		resolvedFallbacks := fallbacks
+		if len(resolvedFallbacks) == 0 {
+			if mc := lookupModelConfigByRef(cfg, primary); mc != nil && len(mc.Fallbacks) > 0 {
+				resolvedFallbacks = mc.Fallbacks
+			}
+		}
+		candidates := resolveModelCandidates(cfg, defaults.Provider, primary, resolvedFallbacks)
+		if len(candidates) == 0 {
+			logger.WarnCF("agent", "Routing tier model did not resolve; tier disabled",
+				map[string]any{"tier": name, "model": primary, "agent_id": agentID})
+			if stateful, ok := provider.(providers.StatefulProvider); ok {
+				stateful.Close()
+			}
+			return
+		}
+
+		result[name] = &ResolvedRouteTier{
+			Name:          name,
+			Primary:       primary,
+			Candidates:    candidates,
+			Provider:      provider,
+			ThinkingLevel: parseThinkingLevel(modelCfg.ThinkingLevel),
+		}
+	}
+
+	for _, tier := range rc.Tiers {
+		if tier.Model == nil {
+			continue
+		}
+		addTier(tier.Name, tier.Model.Primary, tier.Model.Fallbacks)
+	}
+
+	if len(result) == 0 && strings.TrimSpace(rc.LightModel) != "" {
+		addTier("light", rc.LightModel, nil)
+	}
+
+	return result
 }
 
 // resolveAgentWorkspace determines the workspace directory for an agent.

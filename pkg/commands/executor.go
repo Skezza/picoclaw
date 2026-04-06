@@ -68,6 +68,10 @@ func (e *Executor) executeDefinition(ctx context.Context, req Request, def Defin
 	// Sub-command routing
 	subName := nthToken(req.Text, 1)
 	if subName == "" {
+		if def.Handler != nil {
+			err := def.Handler(ctx, req, e.rt)
+			return ExecuteResult{Outcome: OutcomeHandled, Command: def.Name, Err: err}
+		}
 		err := req.Reply("Usage: " + def.EffectiveUsage())
 		return ExecuteResult{Outcome: OutcomeHandled, Command: def.Name, Err: err}
 	}
@@ -84,6 +88,10 @@ func (e *Executor) executeDefinition(ctx context.Context, req Request, def Defin
 	}
 
 	// Unknown sub-command
+	if def.Handler != nil {
+		err := def.Handler(ctx, req, e.rt)
+		return ExecuteResult{Outcome: OutcomeHandled, Command: def.Name, Err: err}
+	}
 	err := req.Reply(fmt.Sprintf("Unknown option: %s. Usage: %s", subName, def.EffectiveUsage()))
 	return ExecuteResult{Outcome: OutcomeHandled, Command: def.Name, Err: err}
 }

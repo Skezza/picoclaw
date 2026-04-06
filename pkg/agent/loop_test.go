@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -73,6 +74,9 @@ func newStartedTestChannelManager(
 
 type recordingProvider struct {
 	lastMessages []providers.Message
+	lastTools    []providers.ToolDefinition
+	responseText string
+	callCount    int
 }
 
 func (r *recordingProvider) Chat(
@@ -82,9 +86,15 @@ func (r *recordingProvider) Chat(
 	model string,
 	opts map[string]any,
 ) (*providers.LLMResponse, error) {
+	r.callCount++
 	r.lastMessages = append([]providers.Message(nil), messages...)
+	r.lastTools = append([]providers.ToolDefinition(nil), tools...)
+	content := strings.TrimSpace(r.responseText)
+	if content == "" {
+		content = "Mock response"
+	}
 	return &providers.LLMResponse{
-		Content:   "Mock response",
+		Content:   content,
 		ToolCalls: []providers.ToolCall{},
 	}, nil
 }
@@ -225,6 +235,547 @@ func TestProcessMessage_UseCommandLoadsRequestedSkill(t *testing.T) {
 	lastMessage := provider.lastMessages[len(provider.lastMessages)-1]
 	if lastMessage.Role != "user" || lastMessage.Content != "explain how to list files" {
 		t.Fatalf("last provider message = %+v, want rewritten user message", lastMessage)
+	}
+}
+
+func TestProcessMessage_CodeWorkModeInjectsPrompt(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				ModelName:         "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+	msgBus := bus.NewMessageBus()
+	provider := &recordingProvider{}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	al.setSessionWorkMode(sessionKeyAgentPrefix+routing.DefaultAgentID+":main", "code")
+
+	response, err := al.processMessage(context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "telegram:123",
+		ChatID:   "chat-1",
+		Content:  "add a new MCP",
+	})
+	if err != nil {
+		t.Fatalf("processMessage() error = %v", err)
+	}
+	if response != "Mock response" {
+		t.Fatalf("processMessage() response = %q, want %q", response, "Mock response")
+	}
+	if len(provider.lastMessages) == 0 {
+		t.Fatal("provider did not receive any messages")
+	}
+
+	systemPrompt := provider.lastMessages[0].Content
+	if !strings.Contains(systemPrompt, "## Code Mode") {
+		t.Fatalf("system prompt missing code mode section:\n%s", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, "spawn a paid subagent") {
+		t.Fatalf("system prompt missing code delegation guidance:\n%s", systemPrompt)
+	}
+}
+
+func TestProcessMessage_CodexPlanModeInjectsPromptAndDisablesTools(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				ModelName:         "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+	msgBus := bus.NewMessageBus()
+	provider := &recordingProvider{}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	al.setSessionWorkMode(sessionKeyAgentPrefix+routing.DefaultAgentID+":main", "codex-plan")
+
+	response, err := al.processMessage(context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "telegram:123",
+		ChatID:   "chat-1",
+		Content:  "Plan how to add a deployment healthcheck",
+	})
+	if err != nil {
+		t.Fatalf("processMessage() error = %v", err)
+	}
+	if response != "Mock response" {
+		t.Fatalf("processMessage() response = %q, want %q", response, "Mock response")
+	}
+	if len(provider.lastMessages) == 0 {
+		t.Fatal("provider did not receive any messages")
+	}
+
+	systemPrompt := provider.lastMessages[0].Content
+	if !strings.Contains(systemPrompt, "## Codex Planning Mode") {
+		t.Fatalf("system prompt missing codex planning mode section:\n%s", systemPrompt)
+	}
+	if len(provider.lastTools) != 0 {
+		t.Fatalf("planning mode should disable tools, got %d tool defs", len(provider.lastTools))
+	}
+}
+
+func TestResolveScopeKey_PreservesExplicitAgentScopedKey(t *testing.T) {
+	route := routing.ResolvedRoute{
+		AgentID:    routing.DefaultAgentID,
+		SessionKey: "agent:main:telegram:direct:123",
+	}
+
+	got := resolveScopeKey(route, "agent:main:cli:test")
+	if got != "agent:main:cli:test" {
+		t.Fatalf("resolveScopeKey() = %q, want explicit agent-scoped key preserved", got)
+	}
+}
+
+func TestResolveScopeKey_NamespacesExplicitExternalKey(t *testing.T) {
+	route := routing.ResolvedRoute{
+		AgentID:    routing.DefaultAgentID,
+		SessionKey: "agent:main:cli:direct:cron",
+	}
+
+	got := resolveScopeKey(route, "cli:diag-github")
+	want := "agent:main:session:cli:diag-github"
+	if got != want {
+		t.Fatalf("resolveScopeKey() = %q, want %q", got, want)
+	}
+}
+
+func TestResolveScopeKey_FallsBackToRouteSessionKey(t *testing.T) {
+	route := routing.ResolvedRoute{
+		AgentID:    routing.DefaultAgentID,
+		SessionKey: "agent:main:telegram:direct:123",
+	}
+
+	got := resolveScopeKey(route, "")
+	if got != route.SessionKey {
+		t.Fatalf("resolveScopeKey() = %q, want route session key %q", got, route.SessionKey)
+	}
+}
+
+func TestProcessMessage_CodexPlanModeArmsApprovalWhenMarkerPresent(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				ModelName:         "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+	msgBus := bus.NewMessageBus()
+	provider := &recordingProvider{responseText: "Plan:\n- do the thing\n[CODEX_APPROVAL_READY]"}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	sessionKey := sessionKeyAgentPrefix + routing.DefaultAgentID + ":main"
+	al.setSessionWorkMode(sessionKey, "codex-plan")
+
+	response, err := al.processMessage(context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "telegram:123",
+		ChatID:   "chat-1",
+		Content:  "Plan the self-deploy change",
+	})
+	if err != nil {
+		t.Fatalf("processMessage() error = %v", err)
+	}
+	if strings.Contains(response, "[CODEX_APPROVAL_READY]") {
+		t.Fatalf("response should not expose approval marker: %q", response)
+	}
+	if !strings.Contains(response, "Reply `proceed` to execute this plan.") {
+		t.Fatalf("response=%q, want proceed instruction", response)
+	}
+	if !al.hasCodexApprovalPending(sessionKey) {
+		t.Fatal("expected approval to be armed")
+	}
+}
+
+func TestProcessMessage_CodexPlanModeArmsApprovalWhenResponseClearlyOffersProceed(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				ModelName:         "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+	msgBus := bus.NewMessageBus()
+	provider := &recordingProvider{responseText: "Plan:\n1. Create NOTES.md\n2. Validate the change\n\nIf you want, I can proceed with the change next."}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	sessionKey := sessionKeyAgentPrefix + routing.DefaultAgentID + ":main"
+	al.setSessionWorkMode(sessionKey, "codex-plan")
+
+	response, err := al.processMessage(context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "telegram:123",
+		ChatID:   "chat-1",
+		Content:  "Plan the tiny repo change",
+	})
+	if err != nil {
+		t.Fatalf("processMessage() error = %v", err)
+	}
+	if !strings.Contains(response, "Reply `proceed` to execute this plan.") {
+		t.Fatalf("response=%q, want proceed instruction", response)
+	}
+	if !al.hasCodexApprovalPending(sessionKey) {
+		t.Fatal("expected approval to be armed")
+	}
+}
+
+func TestProcessMessage_CodexProceedRequiresArmedApprovalLegacy(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				ModelName:         "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+	msgBus := bus.NewMessageBus()
+	provider := &recordingProvider{}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	sessionKey := sessionKeyAgentPrefix + routing.DefaultAgentID + ":main"
+	al.setSessionWorkMode(sessionKey, "codex-plan")
+
+	response, err := al.processMessage(context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "telegram:123",
+		ChatID:   "chat-1",
+		Content:  "proceed",
+	})
+	if err != nil {
+		t.Fatalf("processMessage() error = %v", err)
+	}
+	if response != "No codex plan is awaiting approval yet. Keep chatting in /codex until I ask you to reply `proceed`." {
+		t.Fatalf("response=%q, want approval gate message", response)
+	}
+	if provider.callCount != 0 {
+		t.Fatalf("provider call count=%d, want 0", provider.callCount)
+	}
+}
+
+func TestCodexApprovalMessages_AcceptOnlyExplicitPhrases(t *testing.T) {
+	if _, ok := codexExecutionApprovalMessage("proceed"); !ok {
+		t.Fatal("expected proceed to approve execution")
+	}
+	if _, ok := codexExecutionApprovalMessage("go ahead"); ok {
+		t.Fatal("expected go ahead to be rejected for execution")
+	}
+	if _, ok := codexExecutionApprovalMessage("execute"); ok {
+		t.Fatal("expected execute to be rejected for execution")
+	}
+	if _, ok := codexDeployApprovalMessage("deploy"); !ok {
+		t.Fatal("expected deploy to approve deployment")
+	}
+	if _, ok := codexDeployApprovalMessage("restart"); ok {
+		t.Fatal("expected restart to be rejected for deployment")
+	}
+}
+
+func TestProcessMessage_CodexProceedLaunchesBackgroundRun(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				ModelName:         "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+	msgBus := bus.NewMessageBus()
+	provider := &recordingProvider{}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	sessionKey := sessionKeyAgentPrefix + routing.DefaultAgentID + ":main"
+
+	repoPath := filepath.Join(tmpDir, "repos", "picoclaw")
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = repoPath
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s failed: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	run("git", "init", "-b", "main")
+	run("git", "config", "user.email", "test@example.com")
+	run("git", "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(repoPath, "README.md"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	run("git", "add", "README.md")
+	run("git", "commit", "-m", "init")
+
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	codexPath := filepath.Join(binDir, "codex")
+	codexStub := "#!/bin/sh\ncat >/dev/null\nsleep 1\nprintf '{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"agent_message\",\"text\":\"Run complete\"}}\\n'\nprintf '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}\\n'\n"
+	if err := os.WriteFile(codexPath, []byte(codexStub), 0o755); err != nil {
+		t.Fatalf("write codex stub: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if _, err := al.codexStore.CreateOrActivate(sessionKey, "picoclaw", ""); err != nil {
+		t.Fatalf("CreateOrActivate() error = %v", err)
+	}
+	approvedPlan := "Plan:\n- update the repo\nReply `proceed` to execute this plan."
+	approvedPlanID, approvedPlanHash := codexPlanIdentity(approvedPlan)
+	if err := al.codexStore.SetSessionRuntime(sessionKey, codexSessionRuntimeState{
+		PlannerModel:    "test-model",
+		ExecutorModel:   "codex-local",
+		WorkMode:        "codex-plan",
+		ApprovalPending: true,
+		PendingPlanID:   approvedPlanID,
+		PendingPlanHash: approvedPlanHash,
+	}); err != nil {
+		t.Fatalf("SetSessionRuntime() error = %v", err)
+	}
+	defaultAgent := al.GetRegistry().GetDefaultAgent()
+	defaultAgent.Sessions.AddMessage(sessionKey, "assistant", approvedPlan)
+	al.setSessionWorkMode(sessionKey, "codex-plan")
+	al.setSessionModelOverride(sessionKey, "test-model")
+
+	response, err := al.processMessage(context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "telegram:123",
+		ChatID:   "chat-1",
+		Content:  "proceed",
+	})
+	if err != nil {
+		t.Fatalf("processMessage() error = %v", err)
+	}
+	if !strings.Contains(response, "Codex run started:") {
+		t.Fatalf("response=%q, want run start message", response)
+	}
+	if got := al.getSessionWorkMode(sessionKey); got != "codex-plan" {
+		t.Fatalf("work mode=%q, want %q", got, "codex-plan")
+	}
+	if al.hasCodexApprovalPending(sessionKey) {
+		t.Fatal("approval should be cleared after proceed")
+	}
+	if provider.callCount != 0 {
+		t.Fatalf("provider call count=%d, want 0", provider.callCount)
+	}
+	runs := al.codexStore.ListRuns(sessionKey)
+	if len(runs) != 1 {
+		t.Fatalf("expected 1 codex run, got %d", len(runs))
+	}
+}
+
+func TestProcessMessage_CodexProceedRequiresLatestApprovedPlanHash(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				ModelName:         "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+	msgBus := bus.NewMessageBus()
+	provider := &recordingProvider{}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	sessionKey := sessionKeyAgentPrefix + routing.DefaultAgentID + ":main"
+
+	repoPath := filepath.Join(tmpDir, "repos", "picoclaw")
+	run := func(args ...string) {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = repoPath
+		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s failed: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		}
+	}
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	run("git", "init")
+	run("git", "config", "user.email", "test@example.com")
+	run("git", "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(repoPath, "README.md"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	run("git", "add", "README.md")
+	run("git", "commit", "-m", "init")
+
+	if _, err := al.codexStore.CreateOrActivate(sessionKey, "picoclaw", ""); err != nil {
+		t.Fatalf("CreateOrActivate() error = %v", err)
+	}
+	if err := al.codexStore.SetSessionRuntime(sessionKey, codexSessionRuntimeState{
+		PlannerModel:    "test-model",
+		ExecutorModel:   "codex-local",
+		WorkMode:        "codex-plan",
+		ApprovalPending: true,
+		PendingPlanID:   "plan-stale",
+		PendingPlanHash: "deadbeef",
+	}); err != nil {
+		t.Fatalf("SetSessionRuntime() error = %v", err)
+	}
+	defaultAgent := al.GetRegistry().GetDefaultAgent()
+	defaultAgent.Sessions.AddMessage(sessionKey, "assistant", "Plan:\n- update the repo\nReply `proceed` to execute this plan.")
+	al.setSessionWorkMode(sessionKey, "codex-plan")
+	al.setSessionModelOverride(sessionKey, "test-model")
+
+	response, err := al.processMessage(context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "telegram:123",
+		ChatID:   "chat-1",
+		Content:  "proceed",
+	})
+	if err != nil {
+		t.Fatalf("processMessage() error = %v", err)
+	}
+	if response != "The pending codex plan no longer matches the latest planner reply. Review the latest plan and reply `proceed` again." {
+		t.Fatalf("response=%q, want stale-plan rejection", response)
+	}
+	if al.hasCodexApprovalPending(sessionKey) {
+		t.Fatal("approval should be cleared after plan mismatch")
+	}
+	if provider.callCount != 0 {
+		t.Fatalf("provider call count=%d, want 0", provider.callCount)
+	}
+	if runs := al.codexStore.ListRuns(sessionKey); len(runs) != 0 {
+		t.Fatalf("expected 0 codex runs after mismatch, got %d", len(runs))
+	}
+}
+
+func TestGetSessionWorkMode_FallsBackToCodexPlanForBoundSession(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				ModelName:         "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), &recordingProvider{})
+	sessionKey := sessionKeyAgentPrefix + routing.DefaultAgentID + ":main"
+	if al.codexStore == nil {
+		t.Fatal("codex store should be initialized")
+	}
+	if _, err := al.codexStore.CreateOrActivate(sessionKey, "picoclaw", ""); err != nil {
+		t.Fatalf("CreateOrActivate() error = %v", err)
+	}
+	if got := al.getSessionWorkMode(sessionKey); got != "codex-plan" {
+		t.Fatalf("getSessionWorkMode() = %q, want %q", got, "codex-plan")
+	}
+}
+
+func TestCodexGitHubRepos_ReturnsReposAndBoundsResults(t *testing.T) {
+	tmpDir := t.TempDir()
+	ghDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(ghDir, 0o755); err != nil {
+		t.Fatalf("mkdir gh stub dir: %v", err)
+	}
+	ghPath := filepath.Join(ghDir, "gh")
+	ghScript := `#!/bin/sh
+case "$1 $2" in
+  "auth status")
+    exit 0
+    ;;
+  "repo list")
+    printf 'octo/project-one
+octo/project-two
+octo/project-three
+'
+    exit 0
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`
+	if err := os.WriteFile(ghPath, []byte(ghScript), 0o755); err != nil {
+		t.Fatalf("write gh stub: %v", err)
+	}
+	t.Setenv("PATH", ghDir)
+
+	al := NewAgentLoop(&config.Config{}, bus.NewMessageBus(), &recordingProvider{})
+	repos, err := al.codexGitHubRepos(2)
+	if err != nil {
+		t.Fatalf("codexGitHubRepos() error = %v", err)
+	}
+	want := []string{"octo/project-one", "octo/project-two"}
+	if len(repos) != len(want) {
+		t.Fatalf("repos=%v, want %v", repos, want)
+	}
+	for i := range want {
+		if repos[i] != want[i] {
+			t.Fatalf("repos=%v, want %v", repos, want)
+		}
+	}
+}
+
+func TestCodexGitHubRepos_ReturnsClearErrorWhenUnauthenticated(t *testing.T) {
+	tmpDir := t.TempDir()
+	ghDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(ghDir, 0o755); err != nil {
+		t.Fatalf("mkdir gh stub dir: %v", err)
+	}
+	ghPath := filepath.Join(ghDir, "gh")
+	ghScript := `#!/bin/sh
+case "$1 $2" in
+  "auth status")
+    exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(ghPath, []byte(ghScript), 0o755); err != nil {
+		t.Fatalf("write gh stub: %v", err)
+	}
+	t.Setenv("PATH", ghDir)
+
+	al := NewAgentLoop(&config.Config{}, bus.NewMessageBus(), &recordingProvider{})
+	_, err := al.codexGitHubRepos(5)
+	if err == nil {
+		t.Fatal("codexGitHubRepos() error = nil, want unauthenticated error")
+	}
+	if got := err.Error(); got != "gh CLI is not authenticated to github.com" {
+		t.Fatalf("error = %q, want unauthenticated message", got)
+	}
+}
+
+func TestResolveCodexCLIModelArg_UsesConfiguredModelID(t *testing.T) {
+	cfg := &config.Config{
+		ModelList: []*config.ModelConfig{
+			{
+				ModelName: "codex-cli-local",
+				Model:     "codex-cli/codex",
+			},
+		},
+	}
+
+	got := resolveCodexCLIModelArg(cfg, "codex-cli-local")
+	if got != "codex" {
+		t.Fatalf("resolveCodexCLIModelArg() = %q, want %q", got, "codex")
 	}
 }
 
@@ -741,6 +1292,7 @@ func TestProcessMessage_MediaArtifactCanBeForwardedBySendFile(t *testing.T) {
 	cfg.Agents.Defaults.ModelName = "test-model"
 	cfg.Agents.Defaults.MaxTokens = 4096
 	cfg.Agents.Defaults.MaxToolIterations = 10
+	cfg.Agents.Defaults.Routing = nil
 
 	msgBus := bus.NewMessageBus()
 	provider := &artifactThenSendProvider{}
@@ -1753,6 +2305,126 @@ func TestProcessMessage_SwitchModelRoutesSubsequentRequestsToSelectedProvider(t 
 	}
 }
 
+func TestProcessMessage_BoostForcesPaidModelForOneTurn(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "agent-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	heavyCalls := 0
+	heavyServer := newStrictChatCompletionTestServer(
+		t,
+		"heavy",
+		"gemini-2.5-flash",
+		"heavy reply",
+		&heavyCalls,
+	)
+	defer heavyServer.Close()
+
+	lightCalls := 0
+	lightServer := newStrictChatCompletionTestServer(
+		t,
+		"light",
+		"qwen2.5:0.5b",
+		"light reply",
+		&lightCalls,
+	)
+	defer lightServer.Close()
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				ModelName:         "gemini-main",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+				Routing: &config.RoutingConfig{
+					Enabled:    true,
+					LightModel: "qwen-light",
+					Threshold:  0.99,
+				},
+			},
+		},
+		ModelList: []*config.ModelConfig{
+			{
+				ModelName: "gemini-main",
+				Model:     "gemini/gemini-2.5-flash",
+				APIBase:   heavyServer.URL,
+				APIKeys:   config.SimpleSecureStrings("heavy-key"),
+			},
+			{
+				ModelName: "qwen-light",
+				Model:     "ollama/qwen2.5:0.5b",
+				APIBase:   lightServer.URL,
+				APIKeys:   config.SimpleSecureStrings("light-key"),
+			},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	provider, _, err := providers.CreateProvider(cfg)
+	if err != nil {
+		t.Fatalf("CreateProvider() error = %v", err)
+	}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	helper := testHelper{al: al}
+
+	boostResp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "user1",
+		ChatID:   "chat1",
+		Content:  "/boost",
+		Peer: bus.Peer{
+			Kind: "direct",
+			ID:   "user1",
+		},
+	})
+	if !strings.Contains(boostResp, "Boost armed. Next message will use gemini-main.") {
+		t.Fatalf("unexpected /boost reply: %q", boostResp)
+	}
+
+	firstResp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "user1",
+		ChatID:   "chat1",
+		Content:  "hello after boost",
+		Peer: bus.Peer{
+			Kind: "direct",
+			ID:   "user1",
+		},
+	})
+	if firstResp != "heavy reply" {
+		t.Fatalf("unexpected boosted response: %q", firstResp)
+	}
+	if heavyCalls != 1 {
+		t.Fatalf("heavy calls after boost = %d, want 1", heavyCalls)
+	}
+	if lightCalls != 0 {
+		t.Fatalf("light calls after boost = %d, want 0", lightCalls)
+	}
+
+	secondResp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "user1",
+		ChatID:   "chat1",
+		Content:  "hello after boost consumed",
+		Peer: bus.Peer{
+			Kind: "direct",
+			ID:   "user1",
+		},
+	})
+	if secondResp != "light reply" {
+		t.Fatalf("unexpected post-boost response: %q", secondResp)
+	}
+	if heavyCalls != 1 {
+		t.Fatalf("heavy calls after second message = %d, want 1", heavyCalls)
+	}
+	if lightCalls != 1 {
+		t.Fatalf("light calls after second message = %d, want 1", lightCalls)
+	}
+}
+
 func TestProcessMessage_ModelRoutingUsesLightProvider(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "agent-test-*")
 	if err != nil {
@@ -1836,6 +2508,111 @@ func TestProcessMessage_ModelRoutingUsesLightProvider(t *testing.T) {
 	}
 	if lightCalls != 1 {
 		t.Fatalf("light calls = %d, want 1", lightCalls)
+	}
+}
+
+func TestProcessMessage_TieredRoutingUsesToolsTierForRepoPrompt(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "agent-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	fastCalls := 0
+	fastServer := newStrictChatCompletionTestServer(
+		t,
+		"fast",
+		"gpt-5.4-nano",
+		"fast reply",
+		&fastCalls,
+	)
+	defer fastServer.Close()
+
+	toolsCalls := 0
+	toolsServer := newStrictChatCompletionTestServer(
+		t,
+		"tools",
+		"gpt-5.4-mini",
+		"tools reply",
+		&toolsCalls,
+	)
+	defer toolsServer.Close()
+
+	heavyCalls := 0
+	heavyServer := newStrictChatCompletionTestServer(
+		t,
+		"heavy",
+		"gpt-5-mini",
+		"heavy reply",
+		&heavyCalls,
+	)
+	defer heavyServer.Close()
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				ModelName:         "gpt-5-mini",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+				Routing: &config.RoutingConfig{
+					Enabled:  true,
+					FreeTier: "free",
+					PaidTier: "heavy",
+					Tiers: []config.RoutingTierConfig{
+						{Name: "fast", MaxScore: 0.20, Model: &config.AgentModelConfig{Primary: "gpt-5.4-nano"}},
+						{Name: "tools", MaxScore: 0, Model: &config.AgentModelConfig{Primary: "gpt-5.4-mini"}},
+						{Name: "heavy", MaxScore: 0, Model: &config.AgentModelConfig{Primary: "gpt-5-mini"}},
+						{Name: "free", MaxScore: -1, Model: &config.AgentModelConfig{Primary: "openrouter-free"}},
+					},
+				},
+			},
+		},
+		ModelList: []*config.ModelConfig{
+			{ModelName: "gpt-5.4-nano", Model: "openai/gpt-5.4-nano", APIBase: fastServer.URL, APIKeys: config.SimpleSecureStrings("fast-key")},
+			{ModelName: "gpt-5.4-mini", Model: "openai/gpt-5.4-mini", APIBase: toolsServer.URL, APIKeys: config.SimpleSecureStrings("tools-key")},
+			{ModelName: "gpt-5-mini", Model: "openai/gpt-5-mini", APIBase: heavyServer.URL, APIKeys: config.SimpleSecureStrings("heavy-key")},
+			{ModelName: "openrouter-free", Model: "openrouter/openai/gpt-oss-20b:free", APIBase: "https://openrouter.ai/api/v1", APIKeys: config.SimpleSecureStrings("free-key")},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	provider, _, err := providers.CreateProvider(cfg)
+	if err != nil {
+		t.Fatalf("CreateProvider() error = %v", err)
+	}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	helper := testHelper{al: al}
+
+	simpleResp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "user1",
+		ChatID:   "chat1",
+		Content:  "hi there",
+		Peer:     bus.Peer{Kind: "direct", ID: "user1"},
+	})
+	if simpleResp != "fast reply" {
+		t.Fatalf("simple response = %q, want %q", simpleResp, "fast reply")
+	}
+
+	repoResp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "user1",
+		ChatID:   "chat1",
+		Content:  "fix ./pkg/agent/loop.go and run go test",
+		Peer:     bus.Peer{Kind: "direct", ID: "user1"},
+	})
+	if repoResp != "tools reply" {
+		t.Fatalf("repo response = %q, want %q", repoResp, "tools reply")
+	}
+	if fastCalls != 1 {
+		t.Fatalf("fast calls = %d, want 1", fastCalls)
+	}
+	if toolsCalls != 1 {
+		t.Fatalf("tools calls = %d, want 1", toolsCalls)
+	}
+	if heavyCalls != 0 {
+		t.Fatalf("heavy calls = %d, want 0", heavyCalls)
 	}
 }
 
@@ -2106,7 +2883,8 @@ func TestAgentLoop_ToolLimitUsesDedicatedFallback(t *testing.T) {
 			ID:   "cron",
 		},
 	})
-	history := defaultAgent.Sessions.GetHistory(route.SessionKey)
+	scopeKey := resolveScopeKey(route, "tool-limit")
+	history := defaultAgent.Sessions.GetHistory(scopeKey)
 	if len(history) != 4 {
 		t.Fatalf("history len = %d, want 4", len(history))
 	}

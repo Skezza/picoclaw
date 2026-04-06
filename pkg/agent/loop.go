@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -47,18 +48,23 @@ type AgentLoop struct {
 	hooks    *HookManager
 
 	// Runtime state
-	running        atomic.Bool
-	contextManager ContextManager
-	fallback       *providers.FallbackChain
-	channelManager *channels.Manager
-	mediaStore     media.MediaStore
-	transcriber    asr.Transcriber
-	cmdRegistry    *commands.Registry
-	mcp            mcpRuntime
-	hookRuntime    hookRuntime
-	steering       *steeringQueue
-	pendingSkills  sync.Map
-	mu             sync.RWMutex
+	running                  atomic.Bool
+	contextManager           ContextManager
+	fallback                 *providers.FallbackChain
+	channelManager           *channels.Manager
+	mediaStore               media.MediaStore
+	transcriber              asr.Transcriber
+	cmdRegistry              *commands.Registry
+	mcp                      mcpRuntime
+	hookRuntime              hookRuntime
+	steering                 *steeringQueue
+	codexStore               *codexSessionStore
+	pendingSkills            sync.Map
+	pendingModelOverrides    sync.Map
+	sessionModelOverrides    sync.Map
+	sessionWorkModeOverrides sync.Map
+	sessionCodexApproval     sync.Map
+	mu                       sync.RWMutex
 
 	// Concurrent turn management (from HEAD)
 	activeTurnStates sync.Map     // key: sessionKey (string), value: *turnState
@@ -82,6 +88,7 @@ type processOptions struct {
 	SenderDisplayName       string              // Current sender display name for dynamic context
 	UserMessage             string              // User message content (may include prefix)
 	ForcedSkills            []string            // Skills explicitly requested for this message
+	ForcedModel             string              // Model explicitly forced for this message/session
 	SystemPromptOverride    string              // Override the default system prompt (Used by SubTurns)
 	Media                   []string            // media:// refs from inbound message
 	InitialSteeringMessages []providers.Message // Steering messages from refactor/agent
@@ -104,12 +111,14 @@ const (
 	toolLimitResponse          = "I've reached `max_tool_iterations` without a final response. Increase `max_tool_iterations` in config.json if this task needs more tool steps."
 	handledToolResponseSummary = "Requested output delivered via tool attachment."
 	sessionKeyAgentPrefix      = "agent:"
+	sessionKeyExplicitPrefix   = "session:"
 	metadataKeyAccountID       = "account_id"
 	metadataKeyGuildID         = "guild_id"
 	metadataKeyTeamID          = "team_id"
 	metadataKeyReplyToMessage  = "reply_to_message_id"
 	metadataKeyParentPeerKind  = "parent_peer_kind"
 	metadataKeyParentPeerID    = "parent_peer_id"
+	codexApprovalReadyMarker   = "[CODEX_APPROVAL_READY]"
 )
 
 func NewAgentLoop(
@@ -128,6 +137,9 @@ func NewAgentLoop(
 		if agent, ok := registry.GetAgent(agentID); ok {
 			rl.RegisterCandidates(agent.Candidates)
 			rl.RegisterCandidates(agent.LightCandidates)
+			for _, tier := range agent.RouteTiers {
+				rl.RegisterCandidates(tier.Candidates)
+			}
 		}
 	}
 	fallbackChain := providers.NewFallbackChain(cooldown, rl)
@@ -153,6 +165,12 @@ func NewAgentLoop(
 	al.hooks = NewHookManager(eventBus)
 	configureHookManagerFromConfig(al.hooks, cfg)
 	al.contextManager = al.resolveContextManager()
+	if defaultAgent != nil {
+		al.codexStore = newCodexSessionStore(defaultAgent.Workspace)
+		if al.codexStore != nil {
+			_, _ = al.codexStore.ReconcileRuns()
+		}
+	}
 
 	// Register shared tools to all agents (now that al is created)
 	registerSharedTools(al, cfg, msgBus, registry, provider)
@@ -1047,6 +1065,9 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 		if agent, ok := registry.GetAgent(agentID); ok {
 			newRL.RegisterCandidates(agent.Candidates)
 			newRL.RegisterCandidates(agent.LightCandidates)
+			for _, tier := range agent.RouteTiers {
+				newRL.RegisterCandidates(tier.Candidates)
+			}
 		}
 	}
 	al.fallback = providers.NewFallbackChain(providers.NewCooldownTracker(), newRL)
@@ -1383,7 +1404,7 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		}
 	}
 
-	// Resolve session key from route, while preserving explicit agent-scoped keys.
+	// Resolve session key from route while preserving explicit caller session keys.
 	scopeKey := resolveScopeKey(route, msg.SessionKey)
 	sessionKey := scopeKey
 
@@ -1416,6 +1437,53 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 	// "unavailable" when the required capability is nil.
 	if response, handled := al.handleCommand(ctx, msg, agent, &opts); handled {
 		return response, nil
+	}
+
+	workMode := al.getSessionWorkMode(opts.SessionKey)
+	if isCodexPlanningMode(workMode) {
+		if _, approved := codexDeployApprovalMessage(msg.Content); approved {
+			if runtime, ok := al.codexStore.SessionRuntime(opts.SessionKey); !ok || !runtime.DeployConfirmPending {
+				return "No PicoClaw deploy is awaiting confirmation yet. Finish an approved PicoClaw run first.", nil
+			}
+			response, err := al.startApprovedPicoClawDeploy(opts.SessionKey, opts.Channel, opts.ChatID)
+			if err != nil {
+				return "", err
+			}
+			return response, nil
+		}
+		if approvalMessage, approved := codexExecutionApprovalMessage(msg.Content); approved {
+			if !al.hasCodexApprovalPending(opts.SessionKey) {
+				return "No codex plan is awaiting approval yet. Keep chatting in /codex until I ask you to reply `proceed`.", nil
+			}
+			approvedPlanID, approvedPlanHash, approvedPlanText, err := al.currentApprovedCodexPlan(opts.SessionKey, agent.Sessions.GetHistory(opts.SessionKey))
+			if err != nil {
+				al.clearCodexApprovalPending(opts.SessionKey)
+				return err.Error(), nil
+			}
+			response, err := al.startApprovedCodexRun(ctx, agent, &opts, approvalMessage, approvedPlanID, approvedPlanHash, approvedPlanText)
+			if err != nil {
+				return "", err
+			}
+			return response, nil
+		} else if strings.TrimSpace(msg.Content) != "" {
+			al.clearCodexApprovalPending(opts.SessionKey)
+		}
+	}
+
+	if pendingModel := al.takePendingModelOverride(opts.SessionKey); pendingModel != "" {
+		opts.ForcedModel = pendingModel
+		logger.InfoCF("agent", "Applying pending model override",
+			map[string]any{
+				"session_key": opts.SessionKey,
+				"model":       pendingModel,
+			})
+	} else if sessionModel := al.getSessionModelOverride(opts.SessionKey); sessionModel != "" {
+		opts.ForcedModel = sessionModel
+		logger.DebugCF("agent", "Applying session model override",
+			map[string]any{
+				"session_key": opts.SessionKey,
+				"model":       sessionModel,
+			})
 	}
 
 	if pending := al.takePendingSkills(opts.SessionKey); len(pending) > 0 {
@@ -1453,10 +1521,31 @@ func (al *AgentLoop) resolveMessageRoute(msg bus.InboundMessage) (routing.Resolv
 }
 
 func resolveScopeKey(route routing.ResolvedRoute, msgSessionKey string) string {
-	if msgSessionKey != "" && strings.HasPrefix(msgSessionKey, sessionKeyAgentPrefix) {
+	msgSessionKey = strings.TrimSpace(msgSessionKey)
+	if msgSessionKey == "" {
+		return route.SessionKey
+	}
+	if strings.HasPrefix(msgSessionKey, sessionKeyAgentPrefix) {
 		return msgSessionKey
 	}
-	return route.SessionKey
+
+	agentID := strings.TrimSpace(route.AgentID)
+	if agentID == "" {
+		if parsed := routing.ParseAgentSessionKey(route.SessionKey); parsed != nil {
+			agentID = parsed.AgentID
+		}
+	}
+	if agentID == "" {
+		agentID = routing.DefaultAgentID
+	}
+
+	return fmt.Sprintf(
+		"%s%s:%s%s",
+		sessionKeyAgentPrefix,
+		routing.NormalizeAgentID(agentID),
+		sessionKeyExplicitPrefix,
+		msgSessionKey,
+	)
 }
 
 func (al *AgentLoop) resolveSteeringTarget(msg bus.InboundMessage) (string, string, bool) {
@@ -1733,6 +1822,20 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState) (turnResult, er
 	cfg := al.GetConfig()
 	maxMediaSize := cfg.Agents.Defaults.GetMaxMediaSize()
 	messages = resolveMediaRefs(messages, al.mediaStore, maxMediaSize)
+	workMode := al.getSessionWorkMode(ts.sessionKey)
+	var activeCodex *commands.CodexSessionInfo
+	var codexRepoTargets []string
+	if workMode != "" {
+		if isCodexWorkMode(workMode) {
+			if info, ok := al.codexActiveRuntimeInfo(ts.sessionKey); ok {
+				activeCodex = info
+			}
+			if repos, err := al.codexGitHubRepos(10); err == nil {
+				codexRepoTargets = repos
+			}
+		}
+		messages = injectWorkModePrompt(messages, workMode, ts.agent.Workspace, activeCodex, codexRepoTargets)
+	}
 
 	if !ts.opts.NoHistory {
 		toolDefs := ts.agent.Tools.ToProviderDefs()
@@ -1766,6 +1869,9 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState) (turnResult, er
 				activeSkillNames(ts.agent, ts.opts)...,
 			)
 			messages = resolveMediaRefs(messages, al.mediaStore, maxMediaSize)
+			if workMode != "" {
+				messages = injectWorkModePrompt(messages, workMode, ts.agent.Workspace, activeCodex, codexRepoTargets)
+			}
 		}
 	}
 
@@ -1785,10 +1891,30 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState) (turnResult, er
 		ts.ingestMessage(turnCtx, al, rootMsg)
 	}
 
-	activeCandidates, activeModel, usedLight := al.selectCandidates(ts.agent, ts.userMessage, messages)
+	activeCandidates := ts.agent.Candidates
+	activeModel := resolvedCandidateModel(ts.agent.Candidates, ts.agent.Model)
 	activeProvider := ts.agent.Provider
-	if usedLight && ts.agent.LightProvider != nil {
-		activeProvider = ts.agent.LightProvider
+	activeThinkingLevel := ts.agent.ThinkingLevel
+	if forcedModel := strings.TrimSpace(ts.opts.ForcedModel); forcedModel != "" {
+		forcedCfg, forcedProvider, forcedCandidates, err := al.resolveModelSelection(cfg, ts.agent, forcedModel, ts.sessionKey)
+		if err != nil {
+			turnStatus = TurnEndStatusError
+			return turnResult{}, err
+		}
+		activeCandidates = forcedCandidates
+		activeModel = resolvedCandidateModel(forcedCandidates, forcedModel)
+		activeProvider = forcedProvider
+		activeThinkingLevel = parseThinkingLevel(forcedCfg.ThinkingLevel)
+		if stateful, ok := activeProvider.(providers.StatefulProvider); ok {
+			defer stateful.Close()
+		}
+		logger.InfoCF("agent", "Forced model override selected",
+			map[string]any{
+				"agent_id": ts.agent.ID,
+				"model":    activeModel,
+			})
+	} else {
+		activeCandidates, activeModel, activeProvider, activeThinkingLevel, _ = al.selectCandidates(ts.agent, ts.userMessage, messages)
 	}
 	pendingMessages := append([]providers.Message(nil), ts.opts.InitialSteeringMessages...)
 	var finalContent string
@@ -1888,6 +2014,10 @@ turnLoop:
 
 		gracefulTerminal, _ := ts.gracefulInterruptRequested()
 		providerToolDefs := ts.agent.Tools.ToProviderDefs()
+		if isCodexPlanningMode(workMode) {
+			// Planning mode is intentionally conversation-only.
+			providerToolDefs = nil
+		}
 
 		// Native web search support (from HEAD)
 		_, hasWebSearch := ts.agent.Tools.Get("web_search")
@@ -1895,7 +2025,7 @@ turnLoop:
 			hasWebSearch &&
 			func() bool {
 				// Check if provider supports native search
-				if ns, ok := ts.agent.Provider.(interface{ SupportsNativeSearch() bool }); ok {
+				if ns, ok := activeProvider.(interface{ SupportsNativeSearch() bool }); ok {
 					return ns.SupportsNativeSearch()
 				}
 				return false
@@ -1935,12 +2065,12 @@ turnLoop:
 		if useNativeSearch {
 			llmOpts["native_search"] = true
 		}
-		if ts.agent.ThinkingLevel != ThinkingOff {
-			if tc, ok := ts.agent.Provider.(providers.ThinkingCapable); ok && tc.SupportsThinking() {
-				llmOpts["thinking_level"] = string(ts.agent.ThinkingLevel)
+		if activeThinkingLevel != ThinkingOff {
+			if tc, ok := activeProvider.(providers.ThinkingCapable); ok && tc.SupportsThinking() {
+				llmOpts["thinking_level"] = string(activeThinkingLevel)
 			} else {
 				logger.WarnCF("agent", "thinking_level is set but current provider does not support it, ignoring",
-					map[string]any{"agent_id": ts.agent.ID, "thinking_level": string(ts.agent.ThinkingLevel)})
+					map[string]any{"agent_id": ts.agent.ID, "thinking_level": string(activeThinkingLevel)})
 			}
 		}
 
@@ -2041,7 +2171,7 @@ turnLoop:
 
 		var response *providers.LLMResponse
 		var err error
-		maxRetries := 2
+		maxRetries := 3
 		for retry := 0; retry <= maxRetries; retry++ {
 			response, err = callLLM(callMessages, providerToolDefs)
 			if err == nil {
@@ -2084,6 +2214,35 @@ turnLoop:
 					},
 				)
 				logger.WarnCF("agent", "Timeout error, retrying after backoff", map[string]any{
+					"error":   err.Error(),
+					"retry":   retry,
+					"backoff": backoff.String(),
+				})
+				if sleepErr := sleepWithContext(turnCtx, backoff); sleepErr != nil {
+					if ts.hardAbortRequested() {
+						turnStatus = TurnEndStatusAborted
+						return al.abortTurn(ts)
+					}
+					err = sleepErr
+					break
+				}
+				continue
+			}
+
+			if isRateLimitRetryError(err) && retry < maxRetries {
+				backoff := rateLimitBackoff(retry)
+				al.emitEvent(
+					EventKindLLMRetry,
+					ts.eventMeta("runTurn", "turn.llm.retry"),
+					LLMRetryPayload{
+						Attempt:    retry + 1,
+						MaxRetries: maxRetries,
+						Reason:     "rate_limit",
+						Error:      err.Error(),
+						Backoff:    backoff,
+					},
+				)
+				logger.WarnCF("agent", "Rate limit error, retrying after backoff", map[string]any{
 					"error":   err.Error(),
 					"retry":   retry,
 					"backoff": backoff.String(),
@@ -2824,6 +2983,13 @@ turnLoop:
 			finalContent = ts.opts.DefaultResponse
 		}
 	}
+	if isCodexPlanningMode(workMode) {
+		var approvalPending bool
+		finalContent, approvalPending = normalizeCodexPlanningReply(finalContent)
+		al.setCodexApprovalState(ts.sessionKey, approvalPending, finalContent)
+	} else {
+		al.clearCodexApprovalPending(ts.sessionKey)
+	}
 
 	ts.setPhase(TurnPhaseFinalizing)
 	ts.setFinalContent(finalContent)
@@ -2895,6 +3061,256 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 	}
 }
 
+func workModePrompt(
+	workMode, workspace string,
+	activeCodex *commands.CodexSessionInfo,
+	repoTargets []string,
+) string {
+	switch normalizeCodexWorkMode(workMode) {
+	case "code":
+		return strings.TrimSpace(fmt.Sprintf(`## Code Mode
+	You are in code mode. The user wants PicoClaw improved through repository changes, config updates, or new integrations.
+
+Prioritize implementation over discussion when the request is actionable.
+- Prefer using tools to inspect the repository, edit files, run tests, and inspect git state.
+- If the task can benefit from independent work, spawn a paid subagent for the implementation or verification step.
+- Keep changes scoped and explain the exact files, commands, and validation steps you used.
+- When editing config or adding integrations, prefer explicit, reviewable changes in the workspace.
+	- If the request is risky or ambiguous, surface the risk and ask for confirmation before making destructive changes.
+
+	Workspace root: %s`, workspace))
+	case "codex-plan":
+		repoPath := workspace
+		repoSlug := ""
+		repoURL := ""
+		if activeCodex != nil {
+			if strings.TrimSpace(activeCodex.RepoPath) != "" {
+				repoPath = strings.TrimSpace(activeCodex.RepoPath)
+			}
+			repoSlug = strings.TrimSpace(activeCodex.Slug)
+			repoURL = strings.TrimSpace(activeCodex.RepoURL)
+		}
+
+		extra := ""
+		if repoSlug != "" {
+			extra += "\nCodex Session: " + repoSlug
+		}
+		if repoURL != "" {
+			extra += "\nRepo Remote: " + repoURL
+		}
+		if len(repoTargets) > 0 {
+			limit := len(repoTargets)
+			if limit > 12 {
+				limit = 12
+			}
+			extra += "\nGitHub repos available: " + strings.Join(repoTargets[:limit], ", ")
+		}
+		return strings.TrimSpace(fmt.Sprintf(`## Codex Planning Mode
+You are in codex planning mode. Treat this as conversational pre-planning for a repository session.
+
+Planning-only behavior (strict):
+- Do not execute tools, shell commands, git operations, or file edits in this mode.
+- Ask clarifying questions, identify risks, and refine scope until the user approves execution.
+- Produce structured plans with concrete steps, validation checks, and rollback notes.
+- Keep all proposed paths within the repo workspace; avoid absolute system paths.
+- When the plan is complete and ready for approval, end your response with the exact standalone marker %s.
+
+Execution handoff:
+- After you output the approval marker, the user can reply with a machine-checked approval phrase such as "proceed".
+- After that, switch to implementation with test/build/deploy evidence.
+
+Active repo path: %s%s`, codexApprovalReadyMarker, repoPath, extra))
+	case "ops":
+		return strings.TrimSpace(fmt.Sprintf(`## Ops Mode
+You are in ops mode. The user wants the PicoClaw instance itself adjusted.
+
+Focus on safe, reviewable changes.
+- Prefer config changes over ad hoc mutations.
+- Restart or reload only after the change is validated.
+- Summarize the operational effect, not just the code diff.
+
+Workspace root: %s`, workspace))
+	default:
+		return ""
+	}
+}
+
+func isCodexWorkMode(mode string) bool {
+	return normalizeCodexWorkMode(mode) == "codex-plan"
+}
+
+func normalizeCodexWorkMode(mode string) string {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "codex" {
+		return "codex-plan"
+	}
+	return mode
+}
+
+func isCodexPlanningMode(mode string) bool {
+	return strings.EqualFold(strings.TrimSpace(mode), "codex-plan")
+}
+
+func codexExecutionApprovalMessage(raw string) (string, bool) {
+	switch normalizeCodexApprovalPhrase(raw) {
+	case "proceed":
+		return "The user explicitly approved execution. Execute the approved plan now, work inside the active repo, and report concrete progress as you go.", true
+	default:
+		return "", false
+	}
+}
+
+func codexDeployApprovalMessage(raw string) (string, bool) {
+	switch normalizeCodexApprovalPhrase(raw) {
+	case "deploy":
+		return "The user explicitly approved deployment.", true
+	default:
+		return "", false
+	}
+}
+
+func normalizeCodexApprovalPhrase(raw string) string {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if raw == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range raw {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func codexApprovalReady(content string) bool {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return false
+	}
+	lines := strings.Split(content, "\n")
+	for _, line := range lines {
+		if strings.TrimSpace(line) == codexApprovalReadyMarker {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeCodexPlanningReply(content string) (string, bool) {
+	armed := codexApprovalReady(content)
+	if !armed {
+		armed = codexPlanningImplicitApprovalReady(content)
+	}
+	content = strings.ReplaceAll(content, codexApprovalReadyMarker, "")
+	content = strings.TrimSpace(content)
+	if !armed {
+		return content, false
+	}
+	if content == "" {
+		content = "Plan is ready."
+	}
+	content += "\n\nReply `proceed` to execute this plan."
+	return content, true
+}
+
+func codexPlanningImplicitApprovalReady(content string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(content))
+	if normalized == "" {
+		return false
+	}
+	if strings.Contains(normalized, "?") {
+		return false
+	}
+	if !strings.Contains(normalized, "plan") {
+		return false
+	}
+
+	readyPhrases := []string{
+		"i can proceed",
+		"ready to proceed",
+		"ready to execute",
+		"ready to implement",
+		"i can implement next",
+		"i can make the change next",
+		"i can proceed with the change next",
+		"if you want, i can proceed",
+	}
+	for _, phrase := range readyPhrases {
+		if strings.Contains(normalized, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func injectWorkModePrompt(
+	messages []providers.Message,
+	workMode, workspace string,
+	activeCodex *commands.CodexSessionInfo,
+	repoTargets []string,
+) []providers.Message {
+	instruction := workModePrompt(workMode, workspace, activeCodex, repoTargets)
+	if instruction == "" || len(messages) == 0 {
+		return messages
+	}
+	if strings.TrimSpace(messages[0].Role) != "system" {
+		return messages
+	}
+
+	messages[0].Content = strings.TrimSpace(messages[0].Content + "\n\n---\n\n" + instruction)
+	messages[0].SystemParts = append(messages[0].SystemParts, providers.ContentBlock{
+		Type: "text",
+		Text: instruction,
+	})
+	return messages
+}
+
+func rateLimitBackoff(attempt int) time.Duration {
+	if attempt < 0 {
+		attempt = 0
+	}
+
+	backoff := 5 * time.Second
+	for i := 0; i < attempt; i++ {
+		if backoff >= time.Minute/3 {
+			return time.Minute
+		}
+		backoff *= 3
+	}
+
+	if backoff > time.Minute {
+		return time.Minute
+	}
+	return backoff
+}
+
+func isRateLimitRetryError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var failErr *providers.FailoverError
+	if errors.As(err, &failErr) {
+		return failErr.Reason == providers.FailoverRateLimit || failErr.Reason == providers.FailoverOverloaded
+	}
+
+	var exhausted *providers.FallbackExhaustedError
+	if errors.As(err, &exhausted) {
+		for _, attempt := range exhausted.Attempts {
+			if attempt.Reason == providers.FailoverRateLimit || attempt.Reason == providers.FailoverOverloaded {
+				return true
+			}
+		}
+	}
+
+	if classified := providers.ClassifyError(err, "", ""); classified != nil {
+		return classified.Reason == providers.FailoverRateLimit || classified.Reason == providers.FailoverOverloaded
+	}
+
+	return false
+}
+
 // selectCandidates returns the model candidates and resolved model name to use
 // for a conversation turn. When model routing is configured and the incoming
 // message scores below the complexity threshold, it returns the light model
@@ -2907,30 +3323,42 @@ func (al *AgentLoop) selectCandidates(
 	agent *AgentInstance,
 	userMsg string,
 	history []providers.Message,
-) (candidates []providers.FallbackCandidate, model string, usedLight bool) {
-	if agent.Router == nil || len(agent.LightCandidates) == 0 {
-		return agent.Candidates, resolvedCandidateModel(agent.Candidates, agent.Model), false
+) (candidates []providers.FallbackCandidate, model string, provider providers.LLMProvider, thinking ThinkingLevel, tierName string) {
+	if agent.Router == nil {
+		return agent.Candidates, resolvedCandidateModel(agent.Candidates, agent.Model), agent.Provider, agent.ThinkingLevel, ""
 	}
 
-	_, usedLight, score := agent.Router.SelectModel(userMsg, history, agent.Model)
-	if !usedLight {
+	selectedTier, score := agent.Router.SelectTier(userMsg, history)
+	if selectedTier == "" {
 		logger.DebugCF("agent", "Model routing: primary model selected",
 			map[string]any{
 				"agent_id":  agent.ID,
 				"score":     score,
 				"threshold": agent.Router.Threshold(),
 			})
-		return agent.Candidates, resolvedCandidateModel(agent.Candidates, agent.Model), false
+		return agent.Candidates, resolvedCandidateModel(agent.Candidates, agent.Model), agent.Provider, agent.ThinkingLevel, ""
 	}
 
-	logger.InfoCF("agent", "Model routing: light model selected",
+	tier := agent.RouteTiers[selectedTier]
+	if tier == nil {
+		logger.WarnCF("agent", "Model routing selected missing tier; falling back to primary",
+			map[string]any{
+				"agent_id": agent.ID,
+				"tier":     selectedTier,
+				"score":    score,
+			})
+		return agent.Candidates, resolvedCandidateModel(agent.Candidates, agent.Model), agent.Provider, agent.ThinkingLevel, ""
+	}
+
+	logger.InfoCF("agent", "Model routing: tier selected",
 		map[string]any{
-			"agent_id":    agent.ID,
-			"light_model": agent.Router.LightModel(),
-			"score":       score,
-			"threshold":   agent.Router.Threshold(),
+			"agent_id":  agent.ID,
+			"tier":      selectedTier,
+			"model":     tier.Primary,
+			"score":     score,
+			"threshold": agent.Router.Threshold(),
 		})
-	return agent.LightCandidates, resolvedCandidateModel(agent.LightCandidates, agent.Router.LightModel()), true
+	return tier.Candidates, resolvedCandidateModel(tier.Candidates, tier.Primary), tier.Provider, tier.ThinkingLevel, selectedTier
 }
 
 // resolveContextManager selects the ContextManager implementation based on config.
@@ -3191,6 +3619,52 @@ func (al *AgentLoop) applyExplicitSkillCommand(
 	return true, false, ""
 }
 
+func (al *AgentLoop) resolveModelSelection(cfg *config.Config, agent *AgentInstance, modelName, sessionKey string) (*config.ModelConfig, providers.LLMProvider, []providers.FallbackCandidate, error) {
+	if cfg == nil {
+		return nil, nil, nil, fmt.Errorf("config is nil")
+	}
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" {
+		return nil, nil, nil, fmt.Errorf("model name is required")
+	}
+	workspace := ""
+	fallbacks := []string(nil)
+	if agent != nil {
+		workspace = agent.Workspace
+		fallbacks = agent.Fallbacks
+		if tierName, ok := parseRoutingTierRef(modelName); ok {
+			tier := agent.RouteTiers[tierName]
+			if tier == nil {
+				return nil, nil, nil, fmt.Errorf("routing tier %q is not configured", tierName)
+			}
+			modelCfg, err := resolvedModelConfig(cfg, tier.Primary, workspace)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			if override := al.codexWorkspaceOverride(sessionKey, modelCfg); override != "" {
+				modelCfg.Workspace = override
+			}
+			return modelCfg, tier.Provider, tier.Candidates, nil
+		}
+	}
+	modelCfg, err := resolvedModelConfig(cfg, modelName, workspace)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if override := al.codexWorkspaceOverride(sessionKey, modelCfg); override != "" {
+		modelCfg.Workspace = override
+	}
+	provider, _, err := providers.CreateProviderFromConfig(modelCfg)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to initialize model %q: %w", modelName, err)
+	}
+	candidates := resolveModelCandidates(cfg, cfg.Agents.Defaults.Provider, modelName, fallbacks)
+	if len(candidates) == 0 {
+		return nil, nil, nil, fmt.Errorf("model %q did not resolve to any provider candidates", modelName)
+	}
+	return modelCfg, provider, candidates, nil
+}
+
 func (al *AgentLoop) buildCommandsRuntime(agent *AgentInstance, opts *processOptions) *commands.Runtime {
 	registry := al.GetRegistry()
 	cfg := al.GetConfig()
@@ -3269,6 +3743,242 @@ func (al *AgentLoop) buildCommandsRuntime(agent *AgentInstance, opts *processOpt
 			return oldModel, nil
 		}
 
+		validateSessionModel := func(value string) error {
+			if agent == nil {
+				return fmt.Errorf("session model overrides unavailable in current context")
+			}
+			_, _, _, err := al.resolveModelSelection(cfg, agent, value, "")
+			return err
+		}
+
+		rt.GetSessionModelMode = func() (string, string) {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return "", ""
+			}
+			return al.getSessionModelOverride(opts.SessionKey), al.getPendingModelOverride(opts.SessionKey)
+		}
+		rt.SetSessionModelMode = func(value string) error {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return fmt.Errorf("session model overrides unavailable in current context")
+			}
+			if err := validateSessionModel(value); err != nil {
+				return err
+			}
+			al.setSessionModelOverride(opts.SessionKey, value)
+			al.clearPendingModelOverride(opts.SessionKey)
+			return nil
+		}
+		rt.ArmNextModelMode = func(value string) error {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return fmt.Errorf("session model overrides unavailable in current context")
+			}
+			if err := validateSessionModel(value); err != nil {
+				return err
+			}
+			al.setPendingModelOverride(opts.SessionKey, value)
+			return nil
+		}
+		rt.ClearSessionModelMode = func() error {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return fmt.Errorf("session model overrides unavailable in current context")
+			}
+			al.clearSessionModelOverride(opts.SessionKey)
+			al.clearPendingModelOverride(opts.SessionKey)
+			al.clearSessionWorkMode(opts.SessionKey)
+			return nil
+		}
+		rt.GetSessionWorkMode = func() string {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return ""
+			}
+			return al.getSessionWorkMode(opts.SessionKey)
+		}
+		rt.SetSessionWorkMode = func(value string) error {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return fmt.Errorf("session work mode overrides unavailable in current context")
+			}
+			al.setSessionWorkMode(opts.SessionKey, value)
+			return nil
+		}
+		rt.ClearSessionWorkMode = func() error {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return fmt.Errorf("session work mode overrides unavailable in current context")
+			}
+			al.clearSessionWorkMode(opts.SessionKey)
+			return nil
+		}
+		rt.GetCodexApprovalPending = func() bool {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return false
+			}
+			return al.hasCodexApprovalPending(opts.SessionKey)
+		}
+		rt.ClearCodexApprovalPending = func() {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return
+			}
+			al.clearCodexApprovalPending(opts.SessionKey)
+		}
+		rt.FindCodexModel = func() string {
+			return al.findCodexModelName(cfg)
+		}
+		rt.ListCodexRepoTargets = func(limit int) ([]string, error) {
+			return al.codexGitHubRepos(limit)
+		}
+		rt.CodexNewSession = func(slug, source string) (*commands.CodexSessionInfo, error) {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return nil, fmt.Errorf("codex sessions unavailable in current context")
+			}
+			if al.codexStore == nil {
+				return nil, fmt.Errorf("codex sessions are not initialized")
+			}
+			executorModel := strings.TrimSpace(al.findCodexModelName(cfg))
+			if executorModel == "" {
+				return nil, fmt.Errorf("no codex-cli model configured in model_list")
+			}
+			plannerModel := strings.TrimSpace(al.findCodexPlannerModelName(cfg))
+			if plannerModel == "" {
+				return nil, fmt.Errorf("no planner model configured for /codex")
+			}
+			if err := validateSessionModel(executorModel); err != nil {
+				return nil, err
+			}
+			if err := validateSessionModel(plannerModel); err != nil {
+				return nil, err
+			}
+			if _, err := exec.LookPath("codex"); err != nil {
+				return nil, fmt.Errorf("codex binary not found on host; install Codex CLI first")
+			}
+
+			rec, err := al.codexStore.CreateOrActivate(opts.SessionKey, slug, source)
+			if err != nil {
+				return nil, err
+			}
+
+			_ = al.codexStore.SetSessionRuntime(opts.SessionKey, codexSessionRuntimeState{
+				PlannerModel:  plannerModel,
+				ExecutorModel: executorModel,
+				WorkMode:      "codex-plan",
+			})
+			al.setSessionModelOverride(opts.SessionKey, plannerModel)
+			al.clearPendingModelOverride(opts.SessionKey)
+			al.clearCodexApprovalPending(opts.SessionKey)
+			al.setSessionWorkMode(opts.SessionKey, "codex-plan")
+
+			info := codexRecordToInfo(rec, true)
+			return &info, nil
+		}
+		rt.CodexAttach = func(ref string) (*commands.CodexSessionInfo, error) {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return nil, fmt.Errorf("codex sessions unavailable in current context")
+			}
+			if al.codexStore == nil {
+				return nil, fmt.Errorf("codex sessions are not initialized")
+			}
+			executorModel := strings.TrimSpace(al.findCodexModelName(cfg))
+			if executorModel == "" {
+				return nil, fmt.Errorf("no codex-cli model configured in model_list")
+			}
+			plannerModel := strings.TrimSpace(al.findCodexPlannerModelName(cfg))
+			if plannerModel == "" {
+				return nil, fmt.Errorf("no planner model configured for /codex")
+			}
+			if err := validateSessionModel(executorModel); err != nil {
+				return nil, err
+			}
+			if err := validateSessionModel(plannerModel); err != nil {
+				return nil, err
+			}
+			if _, err := exec.LookPath("codex"); err != nil {
+				return nil, fmt.Errorf("codex binary not found on host; install Codex CLI first")
+			}
+
+			rec, err := al.codexStore.Attach(opts.SessionKey, ref)
+			if err != nil {
+				return nil, err
+			}
+
+			if runtime, ok := al.codexStore.SessionRuntime(opts.SessionKey); ok {
+				if strings.TrimSpace(runtime.ExecutorModel) == "" {
+					runtime.ExecutorModel = executorModel
+				}
+				if strings.TrimSpace(runtime.PlannerModel) == "" {
+					runtime.PlannerModel = plannerModel
+				}
+				if strings.TrimSpace(runtime.WorkMode) == "" {
+					runtime.WorkMode = "codex-plan"
+				}
+				_ = al.codexStore.SetSessionRuntime(opts.SessionKey, runtime)
+				if strings.TrimSpace(runtime.PlannerModel) != "" {
+					plannerModel = runtime.PlannerModel
+				}
+			}
+			al.setSessionModelOverride(opts.SessionKey, plannerModel)
+			al.clearPendingModelOverride(opts.SessionKey)
+			al.clearCodexApprovalPending(opts.SessionKey)
+			al.setSessionWorkMode(opts.SessionKey, "codex-plan")
+
+			info := codexRecordToInfo(rec, true)
+			return &info, nil
+		}
+		rt.CodexListSessions = func() []commands.CodexSessionInfo {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return nil
+			}
+			return al.codexListRuntimeInfo(opts.SessionKey)
+		}
+		rt.CodexListGlobalSessions = func() []commands.CodexSessionInfo {
+			return al.codexListGlobalRuntimeInfo()
+		}
+		rt.CodexActive = func() (*commands.CodexSessionInfo, bool) {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return nil, false
+			}
+			return al.codexActiveRuntimeInfo(opts.SessionKey)
+		}
+		rt.CodexPlannerStatus = func() (*commands.CodexPlannerStatusInfo, bool) {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return nil, false
+			}
+			return al.codexPlannerStatusRuntimeInfo(opts.SessionKey)
+		}
+		rt.CodexRunList = func() []commands.CodexRunInfo {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return nil
+			}
+			return al.codexRunListRuntimeInfo(opts.SessionKey)
+		}
+		rt.CodexRunStatus = func() (*commands.CodexRunInfo, bool) {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return nil, false
+			}
+			return al.codexRunStatusRuntimeInfo(opts.SessionKey)
+		}
+		rt.CodexRunTail = func(runID string, lines int) (string, error) {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return "", fmt.Errorf("codex runs unavailable in current context")
+			}
+			return al.codexRunTail(opts.SessionKey, runID, lines)
+		}
+		rt.CodexRunStop = func() error {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return fmt.Errorf("codex runs unavailable in current context")
+			}
+			if err := al.stopActiveCodexRun(opts.SessionKey); err != nil {
+				return err
+			}
+			if al.codexStore != nil {
+				if err := al.codexStore.Stop(opts.SessionKey); err != nil {
+					return err
+				}
+			}
+			al.clearSessionWorkMode(opts.SessionKey)
+			al.clearCodexApprovalPending(opts.SessionKey)
+			al.clearSessionModelOverride(opts.SessionKey)
+			al.clearPendingModelOverride(opts.SessionKey)
+			return nil
+		}
+
 		rt.ClearHistory = func() error {
 			if opts == nil {
 				return fmt.Errorf("process options not available")
@@ -3304,6 +4014,297 @@ func buildUseCommandHelp(agent *AgentInstance) string {
 		"Usage: /use <skill> [message]\n\nInstalled Skills:\n- %s\n\nUse /use <skill> to apply a skill to your next message, or /use <skill> <message> to force it immediately.",
 		strings.Join(names, "\n- "),
 	)
+}
+
+func (al *AgentLoop) setSessionModelOverride(sessionKey, modelName string) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	modelName = strings.TrimSpace(modelName)
+	if sessionKey == "" {
+		return
+	}
+	if modelName == "" {
+		al.sessionModelOverrides.Delete(sessionKey)
+		if al != nil && al.codexStore != nil {
+			_ = al.codexStore.UpdateSessionRuntime(sessionKey, func(runtime *codexSessionRuntimeState) {
+				runtime.PlannerModel = ""
+			})
+		}
+		return
+	}
+	al.sessionModelOverrides.Store(sessionKey, modelName)
+	if al != nil && al.codexStore != nil {
+		_ = al.codexStore.UpdateSessionRuntime(sessionKey, func(runtime *codexSessionRuntimeState) {
+			runtime.PlannerModel = modelName
+		})
+	}
+}
+
+func (al *AgentLoop) getSessionModelOverride(sessionKey string) string {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return ""
+	}
+	value, ok := al.sessionModelOverrides.Load(sessionKey)
+	if ok {
+		modelName, ok := value.(string)
+		if !ok {
+			return ""
+		}
+		return strings.TrimSpace(modelName)
+	}
+	if al != nil && al.codexStore != nil {
+		if runtime, ok := al.codexStore.SessionRuntime(sessionKey); ok {
+			return strings.TrimSpace(runtime.PlannerModel)
+		}
+	}
+	return ""
+}
+
+func (al *AgentLoop) clearSessionModelOverride(sessionKey string) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return
+	}
+	al.sessionModelOverrides.Delete(sessionKey)
+	if al != nil && al.codexStore != nil {
+		_ = al.codexStore.UpdateSessionRuntime(sessionKey, func(runtime *codexSessionRuntimeState) {
+			runtime.PlannerModel = ""
+		})
+	}
+}
+
+func (al *AgentLoop) setSessionWorkMode(sessionKey, workMode string) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	workMode = normalizeCodexWorkMode(workMode)
+	if sessionKey == "" {
+		return
+	}
+	if workMode == "" {
+		al.sessionWorkModeOverrides.Delete(sessionKey)
+		al.sessionCodexApproval.Delete(sessionKey)
+		if al != nil && al.codexStore != nil {
+			_ = al.codexStore.UpdateSessionRuntime(sessionKey, func(runtime *codexSessionRuntimeState) {
+				runtime.WorkMode = ""
+				runtime.ApprovalPending = false
+				runtime.PendingPlanID = ""
+				runtime.PendingPlanHash = ""
+			})
+		}
+		return
+	}
+	al.sessionWorkModeOverrides.Store(sessionKey, workMode)
+	if al != nil && al.codexStore != nil {
+		_ = al.codexStore.UpdateSessionRuntime(sessionKey, func(runtime *codexSessionRuntimeState) {
+			runtime.WorkMode = workMode
+		})
+	}
+	if !strings.EqualFold(workMode, "codex-plan") {
+		al.sessionCodexApproval.Delete(sessionKey)
+		if al != nil && al.codexStore != nil {
+			_ = al.codexStore.UpdateSessionRuntime(sessionKey, func(runtime *codexSessionRuntimeState) {
+				runtime.ApprovalPending = false
+				runtime.PendingPlanID = ""
+				runtime.PendingPlanHash = ""
+			})
+		}
+	}
+}
+
+func (al *AgentLoop) getSessionWorkMode(sessionKey string) string {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return ""
+	}
+	value, ok := al.sessionWorkModeOverrides.Load(sessionKey)
+	if ok {
+		workMode, ok := value.(string)
+		if !ok {
+			return ""
+		}
+		return normalizeCodexWorkMode(workMode)
+	}
+	if al != nil && al.codexStore != nil {
+		if runtime, ok := al.codexStore.SessionRuntime(sessionKey); ok {
+			if workMode := strings.TrimSpace(runtime.WorkMode); workMode != "" {
+				return normalizeCodexWorkMode(workMode)
+			}
+		}
+		if _, active := al.codexStore.Active(sessionKey); active {
+			return "codex-plan"
+		}
+	}
+	return ""
+}
+
+func (al *AgentLoop) clearSessionWorkMode(sessionKey string) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return
+	}
+	al.sessionWorkModeOverrides.Delete(sessionKey)
+	al.sessionCodexApproval.Delete(sessionKey)
+	if al != nil && al.codexStore != nil {
+		_ = al.codexStore.UpdateSessionRuntime(sessionKey, func(runtime *codexSessionRuntimeState) {
+			runtime.WorkMode = ""
+			runtime.ApprovalPending = false
+			runtime.PendingPlanID = ""
+			runtime.PendingPlanHash = ""
+		})
+	}
+}
+
+func (al *AgentLoop) setCodexApprovalPending(sessionKey string, pending bool) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return
+	}
+	if !pending {
+		al.sessionCodexApproval.Delete(sessionKey)
+		if al != nil && al.codexStore != nil {
+			_ = al.codexStore.UpdateSessionRuntime(sessionKey, func(runtime *codexSessionRuntimeState) {
+				runtime.ApprovalPending = false
+				runtime.PendingPlanID = ""
+				runtime.PendingPlanHash = ""
+			})
+		}
+		return
+	}
+	al.sessionCodexApproval.Store(sessionKey, true)
+	if al != nil && al.codexStore != nil {
+		_ = al.codexStore.UpdateSessionRuntime(sessionKey, func(runtime *codexSessionRuntimeState) {
+			runtime.ApprovalPending = true
+		})
+	}
+}
+
+func (al *AgentLoop) setCodexApprovalState(sessionKey string, pending bool, planText string) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return
+	}
+	planText = strings.TrimSpace(planText)
+	if !pending || planText == "" {
+		al.clearCodexApprovalPending(sessionKey)
+		return
+	}
+	al.sessionCodexApproval.Store(sessionKey, true)
+	if al != nil && al.codexStore != nil {
+		planID, planHash := codexPlanIdentity(planText)
+		_ = al.codexStore.UpdateSessionRuntime(sessionKey, func(runtime *codexSessionRuntimeState) {
+			runtime.ApprovalPending = true
+			runtime.PendingPlanID = planID
+			runtime.PendingPlanHash = planHash
+		})
+	}
+}
+
+func (al *AgentLoop) currentApprovedCodexPlan(sessionKey string, history []providers.Message) (string, string, string, error) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" || al == nil || al.codexStore == nil {
+		return "", "", "", fmt.Errorf("The pending codex plan could not be verified. Ask me to restate the plan, then reply `proceed` again.")
+	}
+	runtime, ok := al.codexStore.SessionRuntime(sessionKey)
+	if !ok || !runtime.ApprovalPending {
+		return "", "", "", fmt.Errorf("No codex plan is awaiting approval yet. Keep chatting in /codex until I ask you to reply `proceed`.")
+	}
+
+	planText := latestAssistantMessage(history)
+	if strings.TrimSpace(planText) == "" {
+		return "", "", "", fmt.Errorf("The pending codex plan could not be verified. Ask me to restate the plan, then reply `proceed` again.")
+	}
+
+	planID, planHash := codexPlanIdentity(planText)
+	if planHash == "" || strings.TrimSpace(runtime.PendingPlanHash) == "" || !strings.EqualFold(strings.TrimSpace(runtime.PendingPlanHash), planHash) {
+		return "", "", "", fmt.Errorf("The pending codex plan no longer matches the latest planner reply. Review the latest plan and reply `proceed` again.")
+	}
+
+	return planID, planHash, planText, nil
+}
+
+func (al *AgentLoop) hasCodexApprovalPending(sessionKey string) bool {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return false
+	}
+	if al != nil && al.codexStore != nil {
+		if runtime, ok := al.codexStore.SessionRuntime(sessionKey); ok && runtime.ApprovalPending {
+			return true
+		}
+	}
+	value, ok := al.sessionCodexApproval.Load(sessionKey)
+	if !ok {
+		return false
+	}
+	pending, ok := value.(bool)
+	return ok && pending
+}
+
+func (al *AgentLoop) clearCodexApprovalPending(sessionKey string) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return
+	}
+	al.sessionCodexApproval.Delete(sessionKey)
+	if al != nil && al.codexStore != nil {
+		_ = al.codexStore.UpdateSessionRuntime(sessionKey, func(runtime *codexSessionRuntimeState) {
+			runtime.ApprovalPending = false
+			runtime.PendingPlanID = ""
+			runtime.PendingPlanHash = ""
+		})
+	}
+}
+
+func (al *AgentLoop) setPendingModelOverride(sessionKey, modelName string) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	modelName = strings.TrimSpace(modelName)
+	if sessionKey == "" {
+		return
+	}
+	if modelName == "" {
+		al.pendingModelOverrides.Delete(sessionKey)
+		return
+	}
+	al.pendingModelOverrides.Store(sessionKey, modelName)
+}
+
+func (al *AgentLoop) getPendingModelOverride(sessionKey string) string {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return ""
+	}
+	value, ok := al.pendingModelOverrides.Load(sessionKey)
+	if !ok {
+		return ""
+	}
+	modelName, ok := value.(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(modelName)
+}
+
+func (al *AgentLoop) takePendingModelOverride(sessionKey string) string {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return ""
+	}
+	value, ok := al.pendingModelOverrides.LoadAndDelete(sessionKey)
+	if !ok {
+		return ""
+	}
+	modelName, ok := value.(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(modelName)
+}
+
+func (al *AgentLoop) clearPendingModelOverride(sessionKey string) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return
+	}
+	al.pendingModelOverrides.Delete(sessionKey)
 }
 
 func (al *AgentLoop) setPendingSkills(sessionKey string, skillNames []string) {

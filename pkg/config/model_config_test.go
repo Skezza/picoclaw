@@ -297,6 +297,95 @@ func TestConfig_ValidateModelList(t *testing.T) {
 	}
 }
 
+func TestConfig_ValidateRouting(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  *Config
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name: "valid tiered routing",
+			config: &Config{
+				Agents: AgentsConfig{
+					Defaults: AgentDefaults{
+						Routing: &RoutingConfig{
+							FreeTier: "free",
+							PaidTier: "heavy",
+							Tiers: []RoutingTierConfig{
+								{Name: "fast", Model: &AgentModelConfig{Primary: "gpt-5.4-nano"}},
+								{Name: "tools", Model: &AgentModelConfig{Primary: "gpt-5.4-mini"}},
+								{Name: "heavy", Model: &AgentModelConfig{Primary: "gpt-5-mini"}},
+								{Name: "free", MaxScore: -1, Model: &AgentModelConfig{Primary: "openrouter-free"}},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "duplicate tier names",
+			config: &Config{
+				Agents: AgentsConfig{
+					Defaults: AgentDefaults{
+						Routing: &RoutingConfig{
+							Tiers: []RoutingTierConfig{
+								{Name: "fast", Model: &AgentModelConfig{Primary: "a"}},
+								{Name: "fast", Model: &AgentModelConfig{Primary: "b"}},
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "duplicate tier name",
+		},
+		{
+			name: "missing tier primary",
+			config: &Config{
+				Agents: AgentsConfig{
+					Defaults: AgentDefaults{
+						Routing: &RoutingConfig{
+							Tiers: []RoutingTierConfig{{Name: "fast", Model: &AgentModelConfig{}}},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "model.primary is required",
+		},
+		{
+			name: "unknown free tier reference",
+			config: &Config{
+				Agents: AgentsConfig{
+					Defaults: AgentDefaults{
+						Routing: &RoutingConfig{
+							FreeTier: "free",
+							Tiers: []RoutingTierConfig{
+								{Name: "fast", Model: &AgentModelConfig{Primary: "a"}},
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "unknown tier",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.config.ValidateRouting()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ValidateRouting() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err != nil && tt.errMsg != "" && !strings.Contains(err.Error(), tt.errMsg) {
+				t.Fatalf("ValidateRouting() error = %v, want substring %q", err, tt.errMsg)
+			}
+		})
+	}
+}
+
 func TestModelConfig_RequestTimeoutParsing(t *testing.T) {
 	jsonData := `{
 		"model_name": "slow-local",

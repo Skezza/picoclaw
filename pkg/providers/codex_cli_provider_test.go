@@ -516,6 +516,39 @@ echo '{"type":"turn.completed"}'`
 	}
 }
 
+func TestCodexCliProvider_MockCLI_OmitsDefaultCodexModelFlag(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "codex")
+	script := `#!/bin/bash
+echo "$@" > "` + filepath.Join(tmpDir, "args.txt") + `"
+echo '{"type":"item.completed","item":{"id":"1","type":"agent_message","text":"ok"}}'
+echo '{"type":"turn.completed"}'`
+
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &CodexCliProvider{
+		command:   scriptPath,
+		workspace: "/tmp/test-workspace",
+	}
+
+	messages := []Message{{Role: "user", Content: "test"}}
+	_, err := p.Chat(context.Background(), messages, nil, "codex", nil)
+	if err != nil {
+		t.Fatalf("Chat() error: %v", err)
+	}
+
+	argsData, err := os.ReadFile(filepath.Join(tmpDir, "args.txt"))
+	if err != nil {
+		t.Fatalf("reading args: %v", err)
+	}
+	args := string(argsData)
+	if strings.Contains(args, "-m codex") {
+		t.Errorf("args should omit default codex model flag, got: %s", args)
+	}
+}
+
 func TestCodexCliProvider_MockCLI_ContextCancel(t *testing.T) {
 	// Script that sleeps forever
 	tmpDir := t.TempDir()

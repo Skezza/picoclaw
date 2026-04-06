@@ -32,22 +32,9 @@ func (p *CodexCliProvider) Chat(
 		return nil, fmt.Errorf("codex command not configured")
 	}
 
-	prompt := p.buildPrompt(messages, tools)
+	prompt := BuildCodexCLIPrompt(messages, tools)
 
-	args := []string{
-		"exec",
-		"--json",
-		"--dangerously-bypass-approvals-and-sandbox",
-		"--skip-git-repo-check",
-		"--color", "never",
-	}
-	if model != "" && model != "codex-cli" {
-		args = append(args, "-m", model)
-	}
-	if p.workspace != "" {
-		args = append(args, "-C", p.workspace)
-	}
-	args = append(args, "-") // read prompt from stdin
+	args := BuildCodexCLIArgs(model, p.workspace)
 
 	cmd := exec.CommandContext(ctx, p.command, args...)
 	cmd.Stdin = bytes.NewReader([]byte(prompt))
@@ -62,7 +49,7 @@ func (p *CodexCliProvider) Chat(
 	// because codex writes diagnostic noise to stderr (e.g. rollout errors)
 	// but still produces valid JSONL output.
 	if stdoutStr := stdout.String(); stdoutStr != "" {
-		resp, parseErr := p.parseJSONLEvents(stdoutStr)
+		resp, parseErr := ParseCodexCLIJSONLEvents(stdoutStr)
 		if parseErr == nil && resp != nil && (resp.Content != "" || len(resp.ToolCalls) > 0) {
 			return resp, nil
 		}
@@ -78,7 +65,7 @@ func (p *CodexCliProvider) Chat(
 		return nil, fmt.Errorf("codex cli error: %w", err)
 	}
 
-	return p.parseJSONLEvents(stdout.String())
+	return ParseCodexCLIJSONLEvents(stdout.String())
 }
 
 // GetDefaultModel returns the default model identifier.
@@ -86,9 +73,29 @@ func (p *CodexCliProvider) GetDefaultModel() string {
 	return "codex-cli"
 }
 
-// buildPrompt converts messages to a prompt string for the Codex CLI.
+// BuildCodexCLIArgs returns the standard non-interactive codex exec arguments.
+func BuildCodexCLIArgs(model, workspace string) []string {
+	args := []string{
+		"exec",
+		"--json",
+		"--dangerously-bypass-approvals-and-sandbox",
+		"--skip-git-repo-check",
+		"--color", "never",
+	}
+	model = strings.TrimSpace(model)
+	if model != "" && model != "codex-cli" && !strings.EqualFold(model, "codex") {
+		args = append(args, "-m", model)
+	}
+	if workspace != "" {
+		args = append(args, "-C", workspace)
+	}
+	args = append(args, "-")
+	return args
+}
+
+// BuildCodexCLIPrompt converts messages to a prompt string for the Codex CLI.
 // System messages are prepended as instructions since Codex CLI has no --system-prompt flag.
-func (p *CodexCliProvider) buildPrompt(messages []Message, tools []ToolDefinition) string {
+func BuildCodexCLIPrompt(messages []Message, tools []ToolDefinition) string {
 	var systemParts []string
 	var conversationParts []string
 
@@ -128,6 +135,12 @@ func (p *CodexCliProvider) buildPrompt(messages []Message, tools []ToolDefinitio
 	return sb.String()
 }
 
+// buildPrompt preserves the existing method surface for tests and callers inside
+// this provider while delegating to the shared exported helper.
+func (p *CodexCliProvider) buildPrompt(messages []Message, tools []ToolDefinition) string {
+	return BuildCodexCLIPrompt(messages, tools)
+}
+
 // codexEvent represents a single JSONL event from `codex exec --json`.
 type codexEvent struct {
 	Type     string          `json:"type"`
@@ -158,8 +171,8 @@ type codexEventErr struct {
 	Message string `json:"message"`
 }
 
-// parseJSONLEvents processes the JSONL output from codex exec --json.
-func (p *CodexCliProvider) parseJSONLEvents(output string) (*LLMResponse, error) {
+// ParseCodexCLIJSONLEvents processes the JSONL output from codex exec --json.
+func ParseCodexCLIJSONLEvents(output string) (*LLMResponse, error) {
 	var contentParts []string
 	var usage *UsageInfo
 	var lastError string
@@ -220,4 +233,8 @@ func (p *CodexCliProvider) parseJSONLEvents(output string) (*LLMResponse, error)
 		FinishReason: finishReason,
 		Usage:        usage,
 	}, nil
+}
+
+func (p *CodexCliProvider) parseJSONLEvents(output string) (*LLMResponse, error) {
+	return ParseCodexCLIJSONLEvents(output)
 }
