@@ -91,6 +91,13 @@ func resetGatewayTestState(t *testing.T) {
 
 func TestGatewayStartReady_NoDefaultModel(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.ModelName = ""
+	err := config.SaveConfig(configPath, cfg)
+	if err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
 	h := NewHandler(configPath)
 
 	ready, reason, err := h.gatewayStartReady()

@@ -538,18 +538,20 @@ func TestProcessMessage_CodexProceedLaunchesBackgroundRun(t *testing.T) {
 	if _, err := al.codexStore.CreateOrActivate(sessionKey, "picoclaw", ""); err != nil {
 		t.Fatalf("CreateOrActivate() error = %v", err)
 	}
+	approvedPlan := "Plan:\n- update the repo\nReply `proceed` to execute this plan."
+	approvedPlanID, approvedPlanHash := codexPlanIdentity(approvedPlan)
 	if err := al.codexStore.SetSessionRuntime(sessionKey, codexSessionRuntimeState{
 		PlannerModel:    "test-model",
 		ExecutorModel:   "codex-local",
 		WorkMode:        "codex-plan",
 		ApprovalPending: true,
-		PendingPlanID:   "plan-1",
-		PendingPlanHash: "hash-1",
+		PendingPlanID:   approvedPlanID,
+		PendingPlanHash: approvedPlanHash,
 	}); err != nil {
 		t.Fatalf("SetSessionRuntime() error = %v", err)
 	}
 	defaultAgent := al.GetRegistry().GetDefaultAgent()
-	defaultAgent.Sessions.AddMessage(sessionKey, "assistant", "Plan:\n- update the repo\nReply `proceed` to execute this plan.")
+	defaultAgent.Sessions.AddMessage(sessionKey, "assistant", approvedPlan)
 	al.setSessionWorkMode(sessionKey, "codex-plan")
 	al.setSessionModelOverride(sessionKey, "test-model")
 
@@ -577,6 +579,85 @@ func TestProcessMessage_CodexProceedLaunchesBackgroundRun(t *testing.T) {
 	runs := al.codexStore.ListRuns(sessionKey)
 	if len(runs) != 1 {
 		t.Fatalf("expected 1 codex run, got %d", len(runs))
+	}
+}
+
+func TestProcessMessage_CodexProceedRequiresLatestApprovedPlanHash(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				ModelName:         "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+	msgBus := bus.NewMessageBus()
+	provider := &recordingProvider{}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	sessionKey := sessionKeyAgentPrefix + routing.DefaultAgentID + ":main"
+
+	repoPath := filepath.Join(tmpDir, "repos", "picoclaw")
+	run := func(args ...string) {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = repoPath
+		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s failed: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		}
+	}
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	run("git", "init")
+	run("git", "config", "user.email", "test@example.com")
+	run("git", "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(repoPath, "README.md"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	run("git", "add", "README.md")
+	run("git", "commit", "-m", "init")
+
+	if _, err := al.codexStore.CreateOrActivate(sessionKey, "picoclaw", ""); err != nil {
+		t.Fatalf("CreateOrActivate() error = %v", err)
+	}
+	if err := al.codexStore.SetSessionRuntime(sessionKey, codexSessionRuntimeState{
+		PlannerModel:    "test-model",
+		ExecutorModel:   "codex-local",
+		WorkMode:        "codex-plan",
+		ApprovalPending: true,
+		PendingPlanID:   "plan-stale",
+		PendingPlanHash: "deadbeef",
+	}); err != nil {
+		t.Fatalf("SetSessionRuntime() error = %v", err)
+	}
+	defaultAgent := al.GetRegistry().GetDefaultAgent()
+	defaultAgent.Sessions.AddMessage(sessionKey, "assistant", "Plan:\n- update the repo\nReply `proceed` to execute this plan.")
+	al.setSessionWorkMode(sessionKey, "codex-plan")
+	al.setSessionModelOverride(sessionKey, "test-model")
+
+	response, err := al.processMessage(context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "telegram:123",
+		ChatID:   "chat-1",
+		Content:  "proceed",
+	})
+	if err != nil {
+		t.Fatalf("processMessage() error = %v", err)
+	}
+	if response != "The pending codex plan no longer matches the latest planner reply. Review the latest plan and reply `proceed` again." {
+		t.Fatalf("response=%q, want stale-plan rejection", response)
+	}
+	if al.hasCodexApprovalPending(sessionKey) {
+		t.Fatal("approval should be cleared after plan mismatch")
+	}
+	if provider.callCount != 0 {
+		t.Fatalf("provider call count=%d, want 0", provider.callCount)
+	}
+	if runs := al.codexStore.ListRuns(sessionKey); len(runs) != 0 {
+		t.Fatalf("expected 0 codex runs after mismatch, got %d", len(runs))
 	}
 }
 

@@ -179,6 +179,10 @@ func (al *AgentLoop) codexRunTail(sessionKey, runID string, lines int) (string, 
 	if al == nil || al.codexStore == nil {
 		return "", fmt.Errorf("codex runs are not initialized")
 	}
+	activeSessionID := ""
+	if active, ok := al.codexStore.Active(sessionKey); ok && active != nil {
+		activeSessionID = strings.TrimSpace(active.ID)
+	}
 	runID = strings.TrimSpace(runID)
 	if runID == "" {
 		if active, ok := al.codexStore.ActiveRun(sessionKey); ok && active != nil {
@@ -195,6 +199,13 @@ func (al *AgentLoop) codexRunTail(sessionKey, runID string, lines int) (string, 
 	if !ok || run == nil {
 		return "", fmt.Errorf("codex run %q not found", runID)
 	}
+	if strings.TrimSpace(sessionKey) != "" {
+		sameScope := strings.EqualFold(strings.TrimSpace(run.ScopeKey), strings.TrimSpace(sessionKey))
+		sameSession := activeSessionID != "" && strings.EqualFold(strings.TrimSpace(run.SessionID), activeSessionID)
+		if !sameScope && !sameSession {
+			return "", fmt.Errorf("codex run %q does not belong to the active session in this chat", runID)
+		}
+	}
 	if strings.TrimSpace(run.LogPath) == "" {
 		return "", nil
 	}
@@ -206,6 +217,9 @@ func (al *AgentLoop) startApprovedCodexRun(
 	agent *AgentInstance,
 	opts *processOptions,
 	userMessage string,
+	approvedPlanID string,
+	approvedPlanHash string,
+	approvedPlanText string,
 ) (string, error) {
 	if al == nil || al.codexStore == nil {
 		return "", fmt.Errorf("codex runs are not initialized")
@@ -242,8 +256,8 @@ func (al *AgentLoop) startApprovedCodexRun(
 		PlannerModel:  plannerModel,
 		ExecutorModel: executorModel,
 		Mode:          "autonomous",
-		PlanID:        runtime.PendingPlanID,
-		PlanHash:      runtime.PendingPlanHash,
+		PlanID:        strings.TrimSpace(approvedPlanID),
+		PlanHash:      strings.TrimSpace(approvedPlanHash),
 		InitiatedBy:   strings.TrimSpace(opts.SenderID),
 	})
 	if err != nil {
@@ -274,7 +288,10 @@ func (al *AgentLoop) startApprovedCodexRun(
 
 	history := agent.Sessions.GetHistory(opts.SessionKey)
 	summary := agent.Sessions.GetSummary(opts.SessionKey)
-	planText := latestAssistantMessage(history)
+	planText := strings.TrimSpace(approvedPlanText)
+	if planText == "" {
+		planText = latestAssistantMessage(history)
+	}
 	promptMessages := buildCodexExecutionPromptMessages(sessionRec, run, summary, history, planText, userMessage)
 	prompt := providers.BuildCodexCLIPrompt(promptMessages, nil)
 
@@ -628,7 +645,8 @@ func codexPlanIdentity(planText string) (string, string) {
 		return "", ""
 	}
 	sum := sha256.Sum256([]byte(planText))
-	return "plan-" + newCodexRunID(), hex.EncodeToString(sum[:8])
+	hash := hex.EncodeToString(sum[:])
+	return "plan-" + hash[:12], hash
 }
 
 func tailFileLines(path string, lines int) (string, error) {

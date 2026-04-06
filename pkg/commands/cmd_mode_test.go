@@ -189,6 +189,25 @@ func TestFreeCommand_SetsPersistentModel(t *testing.T) {
 	}
 }
 
+func TestSessionModeTargets_DefaultConfigAlignsWithRoutingDefaults(t *testing.T) {
+	rt := &Runtime{Config: config.DefaultConfig()}
+
+	targets := sessionModeTargets(rt)
+
+	if targets.Fast.Target != "tier:fast" || targets.Fast.Label != "gpt-5.4-nano" {
+		t.Fatalf("fast=%+v, want tier:fast / gpt-5.4-nano", targets.Fast)
+	}
+	if targets.Tools.Target != "tier:tools" || targets.Tools.Label != "gpt-5.4-mini" {
+		t.Fatalf("tools=%+v, want tier:tools / gpt-5.4-mini", targets.Tools)
+	}
+	if targets.Heavy.Target != "tier:heavy" || targets.Heavy.Label != "gpt-5-mini" {
+		t.Fatalf("heavy=%+v, want tier:heavy / gpt-5-mini", targets.Heavy)
+	}
+	if targets.Free.Target != "tier:free" || targets.Free.Label != "openrouter-free-qwen" {
+		t.Fatalf("free=%+v, want tier:free / openrouter-free-qwen", targets.Free)
+	}
+}
+
 func TestDefaultCommand_ClearsSessionModel(t *testing.T) {
 	rt := newModeTestRuntime()
 	persistent := "tier:free"

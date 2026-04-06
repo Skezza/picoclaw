@@ -1455,7 +1455,12 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 			if !al.hasCodexApprovalPending(opts.SessionKey) {
 				return "No codex plan is awaiting approval yet. Keep chatting in /codex until I ask you to reply `proceed`.", nil
 			}
-			response, err := al.startApprovedCodexRun(ctx, agent, &opts, approvalMessage)
+			approvedPlanID, approvedPlanHash, approvedPlanText, err := al.currentApprovedCodexPlan(opts.SessionKey, agent.Sessions.GetHistory(opts.SessionKey))
+			if err != nil {
+				al.clearCodexApprovalPending(opts.SessionKey)
+				return err.Error(), nil
+			}
+			response, err := al.startApprovedCodexRun(ctx, agent, &opts, approvalMessage, approvedPlanID, approvedPlanHash, approvedPlanText)
 			if err != nil {
 				return "", err
 			}
@@ -4187,6 +4192,29 @@ func (al *AgentLoop) setCodexApprovalState(sessionKey string, pending bool, plan
 			runtime.PendingPlanHash = planHash
 		})
 	}
+}
+
+func (al *AgentLoop) currentApprovedCodexPlan(sessionKey string, history []providers.Message) (string, string, string, error) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" || al == nil || al.codexStore == nil {
+		return "", "", "", fmt.Errorf("The pending codex plan could not be verified. Ask me to restate the plan, then reply `proceed` again.")
+	}
+	runtime, ok := al.codexStore.SessionRuntime(sessionKey)
+	if !ok || !runtime.ApprovalPending {
+		return "", "", "", fmt.Errorf("No codex plan is awaiting approval yet. Keep chatting in /codex until I ask you to reply `proceed`.")
+	}
+
+	planText := latestAssistantMessage(history)
+	if strings.TrimSpace(planText) == "" {
+		return "", "", "", fmt.Errorf("The pending codex plan could not be verified. Ask me to restate the plan, then reply `proceed` again.")
+	}
+
+	planID, planHash := codexPlanIdentity(planText)
+	if planHash == "" || strings.TrimSpace(runtime.PendingPlanHash) == "" || !strings.EqualFold(strings.TrimSpace(runtime.PendingPlanHash), planHash) {
+		return "", "", "", fmt.Errorf("The pending codex plan no longer matches the latest planner reply. Review the latest plan and reply `proceed` again.")
+	}
+
+	return planID, planHash, planText, nil
 }
 
 func (al *AgentLoop) hasCodexApprovalPending(sessionKey string) bool {

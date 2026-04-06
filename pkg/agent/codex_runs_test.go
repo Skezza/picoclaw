@@ -331,6 +331,95 @@ func TestCodexSessionStore_ListIsScopedByChatRecentHistory(t *testing.T) {
 	}
 }
 
+func TestCodexRunTail_AllowsActiveSessionRunsAcrossChats(t *testing.T) {
+	workspace := t.TempDir()
+	store := newCodexSessionStore(workspace)
+	if store == nil {
+		t.Fatal("expected codex session store")
+	}
+
+	scopeA := "agent:test:chat-a"
+	scopeB := "agent:test:chat-b"
+	repoPath, err := store.repoPathForSlug("picoclaw")
+	if err != nil {
+		t.Fatalf("repoPathForSlug() error = %v", err)
+	}
+	if err := initGitRepo(t, repoPath); err != nil {
+		t.Fatalf("initGitRepo() error = %v", err)
+	}
+
+	session, err := store.CreateOrActivate(scopeA, "picoclaw", "")
+	if err != nil {
+		t.Fatalf("CreateOrActivate(scopeA) error = %v", err)
+	}
+	run, err := store.CreateRun(scopeA, codexRunCreateOptions{PlannerModel: "gpt-5.4-mini", Mode: "autonomous"})
+	if err != nil {
+		t.Fatalf("CreateRun() error = %v", err)
+	}
+	logPath := filepath.Join(workspace, "run.log")
+	if err := os.WriteFile(logPath, []byte("tail line 1\ntail line 2\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := store.MarkRunStarted(run.ID, 12345, logPath); err != nil {
+		t.Fatalf("MarkRunStarted() error = %v", err)
+	}
+	if _, err := store.Attach(scopeB, session.ID); err != nil {
+		t.Fatalf("Attach(scopeB) error = %v", err)
+	}
+
+	al := &AgentLoop{codexStore: store}
+	output, err := al.codexRunTail(scopeB, run.ID, 20)
+	if err != nil {
+		t.Fatalf("codexRunTail() error = %v", err)
+	}
+	if output != "tail line 1\ntail line 2" {
+		t.Fatalf("codexRunTail() = %q, want log contents", output)
+	}
+}
+
+func TestCodexRunTail_RejectsRunOutsideActiveSession(t *testing.T) {
+	workspace := t.TempDir()
+	store := newCodexSessionStore(workspace)
+	if store == nil {
+		t.Fatal("expected codex session store")
+	}
+
+	scopeA := "agent:test:chat-a"
+	scopeB := "agent:test:chat-b"
+	for _, slug := range []string{"picoclaw", "skezos"} {
+		repoPath, err := store.repoPathForSlug(slug)
+		if err != nil {
+			t.Fatalf("repoPathForSlug(%q) error = %v", slug, err)
+		}
+		if err := initGitRepo(t, repoPath); err != nil {
+			t.Fatalf("initGitRepo(%q) error = %v", slug, err)
+		}
+	}
+
+	if _, err := store.CreateOrActivate(scopeA, "picoclaw", ""); err != nil {
+		t.Fatalf("CreateOrActivate(scopeA) error = %v", err)
+	}
+	runA, err := store.CreateRun(scopeA, codexRunCreateOptions{PlannerModel: "gpt-5.4-mini", Mode: "autonomous"})
+	if err != nil {
+		t.Fatalf("CreateRun(scopeA) error = %v", err)
+	}
+	logPath := filepath.Join(workspace, "run-a.log")
+	if err := os.WriteFile(logPath, []byte("tail line 1\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := store.MarkRunStarted(runA.ID, 12345, logPath); err != nil {
+		t.Fatalf("MarkRunStarted() error = %v", err)
+	}
+	if _, err := store.CreateOrActivate(scopeB, "skezos", ""); err != nil {
+		t.Fatalf("CreateOrActivate(scopeB) error = %v", err)
+	}
+
+	al := &AgentLoop{codexStore: store}
+	if _, err := al.codexRunTail(scopeB, runA.ID, 20); err == nil || !strings.Contains(err.Error(), "does not belong to the active session in this chat") {
+		t.Fatalf("codexRunTail() error = %v, want scope rejection", err)
+	}
+}
+
 func TestIsPicoClawRun_MatchesExactRepoIdentity(t *testing.T) {
 	tests := []struct {
 		name string
