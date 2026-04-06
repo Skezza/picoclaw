@@ -467,6 +467,24 @@ func TestProcessMessage_CodexProceedRequiresArmedApprovalLegacy(t *testing.T) {
 	}
 }
 
+func TestCodexApprovalMessages_AcceptOnlyExplicitPhrases(t *testing.T) {
+	if _, ok := codexExecutionApprovalMessage("proceed"); !ok {
+		t.Fatal("expected proceed to approve execution")
+	}
+	if _, ok := codexExecutionApprovalMessage("go ahead"); ok {
+		t.Fatal("expected go ahead to be rejected for execution")
+	}
+	if _, ok := codexExecutionApprovalMessage("execute"); ok {
+		t.Fatal("expected execute to be rejected for execution")
+	}
+	if _, ok := codexDeployApprovalMessage("deploy"); !ok {
+		t.Fatal("expected deploy to approve deployment")
+	}
+	if _, ok := codexDeployApprovalMessage("restart"); ok {
+		t.Fatal("expected restart to be rejected for deployment")
+	}
+}
+
 func TestProcessMessage_CodexProceedLaunchesBackgroundRun(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := &config.Config{

@@ -288,7 +288,7 @@ func (s *codexSessionStore) ActiveRun(scopeKey string) (*codexRunRecord, bool) {
 	if rec == nil {
 		return nil, false
 	}
-	return rec, true
+	return cloneCodexRunRecord(rec), true
 }
 
 func (s *codexSessionStore) ActiveRunForRepo(repoPath, repoSlug string) (*codexRunRecord, bool) {
@@ -303,7 +303,7 @@ func (s *codexSessionStore) ActiveRunForRepo(repoPath, repoSlug string) (*codexR
 	if rec == nil {
 		return nil, false
 	}
-	return rec, true
+	return cloneCodexRunRecord(rec), true
 }
 
 func (s *codexSessionStore) MarkRunStarted(runID string, pid int, logPath string) error {

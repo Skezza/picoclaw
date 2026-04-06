@@ -227,6 +227,89 @@ func TestCodexSessionStore_ReconcileRunsMarksCompletedLogSucceeded(t *testing.T)
 	}
 }
 
+func TestCodexSessionStore_ActiveRunReturnsClone(t *testing.T) {
+	workspace := t.TempDir()
+	store := newCodexSessionStore(workspace)
+	if store == nil {
+		t.Fatal("expected codex session store")
+	}
+
+	scopeKey := "agent:test:main"
+	slug := "picoclaw-demo"
+	repoPath, err := store.repoPathForSlug(slug)
+	if err != nil {
+		t.Fatalf("repoPathForSlug() error = %v", err)
+	}
+	if err := initGitRepo(t, repoPath); err != nil {
+		t.Fatalf("initGitRepo() error = %v", err)
+	}
+	if _, err := store.CreateOrActivate(scopeKey, slug, "https://github.com/Skezza/picoclaw.git"); err != nil {
+		t.Fatalf("CreateOrActivate() error = %v", err)
+	}
+
+	run, err := store.CreateRun(scopeKey, codexRunCreateOptions{PlannerModel: "gpt-5.4-mini", Mode: "autonomous"})
+	if err != nil {
+		t.Fatalf("CreateRun() error = %v", err)
+	}
+
+	active, ok := store.ActiveRun(scopeKey)
+	if !ok || active == nil {
+		t.Fatal("expected active run")
+	}
+	active.Status = "tampered"
+	active.PID = 123
+
+	reloaded, ok := store.GetRun(run.ID)
+	if !ok || reloaded == nil {
+		t.Fatal("expected stored run")
+	}
+	if reloaded.Status == "tampered" || reloaded.PID == 123 {
+		t.Fatalf("stored run mutated through ActiveRun(): %+v", reloaded)
+	}
+}
+
+func TestIsPicoClawRun_MatchesExactRepoIdentity(t *testing.T) {
+	tests := []struct {
+		name string
+		run  *codexRunRecord
+		want bool
+	}{
+		{
+			name: "exact repo url basename",
+			run:  &codexRunRecord{RepoURL: "https://github.com/Skezza/picoclaw.git", RepoSlug: "Skezza-picoclaw"},
+			want: true,
+		},
+		{
+			name: "exact local path basename",
+			run:  &codexRunRecord{RepoPath: "/workspace/repos/picoclaw"},
+			want: true,
+		},
+		{
+			name: "exact slug only",
+			run:  &codexRunRecord{RepoSlug: "picoclaw"},
+			want: true,
+		},
+		{
+			name: "substring slug should not match",
+			run:  &codexRunRecord{RepoSlug: "picoclaw-demo"},
+			want: false,
+		},
+		{
+			name: "substring path should not match",
+			run:  &codexRunRecord{RepoPath: "/workspace/repos/my-picoclaw-fork-copy"},
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isPicoClawRun(tc.run); got != tc.want {
+				t.Fatalf("isPicoClawRun() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSanitizeRepoRemoteStripsCredentials(t *testing.T) {
 	got := sanitizeRepoRemote("https://user:token@example.com/org/repo.git")
 	if got != "https://example.com/org/repo.git" {

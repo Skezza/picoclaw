@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -377,7 +378,7 @@ func (al *AgentLoop) startApprovedPicoClawDeploy(scopeKey, channel, chatID strin
 	plannerModel := strings.TrimSpace(runtime.PlannerModel)
 	executorModel := "deploy-script"
 	run, err := al.codexStore.CreateRun(scopeKey, codexRunCreateOptions{
-		PlannerModel: plannerModel,
+		PlannerModel:  plannerModel,
 		ExecutorModel: executorModel,
 		Mode:          "deploy",
 		InitiatedBy:   "deploy-approval",
@@ -550,8 +551,55 @@ func isPicoClawRun(run *codexRunRecord) bool {
 	if run == nil {
 		return false
 	}
-	all := strings.ToLower(strings.Join([]string{run.RepoSlug, run.RepoPath, run.RepoURL}, " "))
-	return strings.Contains(all, "picoclaw")
+	for _, candidate := range []string{
+		codexRepoNameFromURL(run.RepoURL),
+		codexRepoNameFromPath(run.RepoPath),
+		codexRepoNameFromSlug(run.RepoSlug),
+	} {
+		if strings.EqualFold(candidate, "picoclaw") {
+			return true
+		}
+	}
+	return false
+}
+
+func codexRepoNameFromURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "git@") {
+		if idx := strings.Index(raw, ":"); idx >= 0 && idx+1 < len(raw) {
+			raw = raw[idx+1:]
+		}
+		return codexRepoNameFromPath(raw)
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return codexRepoNameFromPath(parsed.Path)
+}
+
+func codexRepoNameFromPath(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	name := filepath.Base(strings.Trim(raw, "/"))
+	name = strings.TrimSpace(strings.TrimSuffix(name, ".git"))
+	return strings.ToLower(name)
+}
+
+func codexRepoNameFromSlug(raw string) string {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if raw == "" {
+		return ""
+	}
+	if raw == "picoclaw" {
+		return raw
+	}
+	return ""
 }
 
 func killCodexProcess(pid int) error {

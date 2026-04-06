@@ -3144,7 +3144,7 @@ func isCodexPlanningMode(mode string) bool {
 
 func codexExecutionApprovalMessage(raw string) (string, bool) {
 	switch normalizeCodexApprovalPhrase(raw) {
-	case "proceed", "go", "goahead", "execute", "runit":
+	case "proceed":
 		return "The user explicitly approved execution. Execute the approved plan now, work inside the active repo, and report concrete progress as you go.", true
 	default:
 		return "", false
@@ -3153,7 +3153,7 @@ func codexExecutionApprovalMessage(raw string) (string, bool) {
 
 func codexDeployApprovalMessage(raw string) (string, bool) {
 	switch normalizeCodexApprovalPhrase(raw) {
-	case "deploy", "confirmdeploy", "restart", "shipit":
+	case "deploy":
 		return "The user explicitly approved deployment.", true
 	default:
 		return "", false
