@@ -70,40 +70,63 @@ old_mcp_fs="$(readlink -f "$BIN_DIR/picoclaw-mcp-fs" 2>/dev/null || true)"
 if [[ -z "$old_mcp_fs" && -f "$BIN_DIR/picoclaw-mcp-fs" ]]; then
   old_mcp_fs="$BIN_DIR/picoclaw-mcp-fs"
 fi
+if [[ -z "$old_picoclaw" ]]; then
+  old_picoclaw="$INSTALL_ROOT/picoclaw"
+fi
+if [[ -z "$old_launcher" ]]; then
+  old_launcher="$INSTALL_ROOT/picoclaw-launcher"
+fi
+if [[ -z "$old_mcp_fs" ]]; then
+  old_mcp_fs="$INSTALL_ROOT/picoclaw-mcp-fs"
+fi
 
 rollback_dir="$(mktemp -d)"
 rollback() {
   echo "Deployment failed, rolling back." >&2
-  if [[ -n "$old_picoclaw" ]]; then
-    ln -sfn "$old_picoclaw" "$BIN_DIR/picoclaw"
+  systemctl --user stop "$SERVICE_NAME" || true
+  if [[ -f "$rollback_dir/picoclaw" && -n "$old_picoclaw" ]]; then
+    cat "$rollback_dir/picoclaw" > "$old_picoclaw"
+    chmod +x "$old_picoclaw"
   fi
-  if [[ -n "$old_launcher" ]]; then
-    ln -sfn "$old_launcher" "$BIN_DIR/picoclaw-launcher"
+  if [[ -f "$rollback_dir/picoclaw-launcher" && -n "$old_launcher" ]]; then
+    cat "$rollback_dir/picoclaw-launcher" > "$old_launcher"
+    chmod +x "$old_launcher"
   fi
   if [[ -f "$rollback_dir/picoclaw-mcp-fs" ]]; then
-    cp "$rollback_dir/picoclaw-mcp-fs" "$BIN_DIR/picoclaw-mcp-fs"
-    chmod +x "$BIN_DIR/picoclaw-mcp-fs"
+    cat "$rollback_dir/picoclaw-mcp-fs" > "$old_mcp_fs"
+    chmod +x "$old_mcp_fs"
   elif [[ -n "$old_mcp_fs" ]]; then
-    ln -sfn "$old_mcp_fs" "$BIN_DIR/picoclaw-mcp-fs"
+    rm -f "$old_mcp_fs"
   fi
-  systemctl --user restart "$SERVICE_NAME" || true
+  systemctl --user start "$SERVICE_NAME" || true
 }
 
+if [[ -f "$old_picoclaw" ]]; then
+  cp "$old_picoclaw" "$rollback_dir/picoclaw"
+fi
+if [[ -f "$old_launcher" ]]; then
+  cp "$old_launcher" "$rollback_dir/picoclaw-launcher"
+fi
 if [[ -n "$old_mcp_fs" && -f "$old_mcp_fs" ]]; then
   cp "$old_mcp_fs" "$rollback_dir/picoclaw-mcp-fs"
 fi
 
-ln -sfn "$release_dir/picoclaw" "$BIN_DIR/picoclaw"
-ln -sfn "$release_dir/picoclaw-launcher" "$BIN_DIR/picoclaw-launcher"
-if [[ -f "$release_dir/picoclaw-mcp-fs" ]]; then
-  ln -sfn "$release_dir/picoclaw-mcp-fs" "$BIN_DIR/picoclaw-mcp-fs"
-fi
 chmod +x "$release_dir/picoclaw" "$release_dir/picoclaw-launcher"
 if [[ -f "$release_dir/picoclaw-mcp-fs" ]]; then
   chmod +x "$release_dir/picoclaw-mcp-fs"
 fi
 
-systemctl --user restart "$SERVICE_NAME"
+systemctl --user stop "$SERVICE_NAME"
+cat "$release_dir/picoclaw" > "$old_picoclaw"
+chmod +x "$old_picoclaw"
+cat "$release_dir/picoclaw-launcher" > "$old_launcher"
+chmod +x "$old_launcher"
+if [[ -f "$release_dir/picoclaw-mcp-fs" ]]; then
+  cat "$release_dir/picoclaw-mcp-fs" > "$old_mcp_fs"
+  chmod +x "$old_mcp_fs"
+fi
+
+systemctl --user start "$SERVICE_NAME"
 systemctl --user is-active --quiet "$SERVICE_NAME"
 
 check_health() {
