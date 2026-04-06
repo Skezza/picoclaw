@@ -587,41 +587,6 @@ func TestGetSessionWorkMode_FallsBackToCodexPlanForBoundSession(t *testing.T) {
 	}
 }
 
-func TestCodexDelegateTargets_IncludesConfiguredModels(t *testing.T) {
-	tmpDir := t.TempDir()
-	cfg := &config.Config{
-		Agents: config.AgentsConfig{
-			Defaults: config.AgentDefaults{
-				Workspace:         tmpDir,
-				ModelName:         "gpt-5.4-mini",
-				MaxTokens:         4096,
-				MaxToolIterations: 10,
-				Routing: &config.RoutingConfig{
-					Enabled:    true,
-					LightModel: "openrouter-free",
-				},
-			},
-		},
-		ModelList: []*config.ModelConfig{
-			{ModelName: "gpt-5.4-mini", Model: "openai/gpt-5.4-mini"},
-			{ModelName: "openrouter-free", Model: "openrouter/free"},
-			{ModelName: "codex-local", Model: "codex-cli/gpt-5.4-mini"},
-		},
-	}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &recordingProvider{})
-
-	targets := al.codexDelegateTargets(cfg)
-	want := []string{"codex-local", "gpt-5.4-mini", "openrouter-free"}
-	if len(targets) != len(want) {
-		t.Fatalf("targets=%v, want %v", targets, want)
-	}
-	for i := range want {
-		if targets[i] != want[i] {
-			t.Fatalf("targets=%v, want %v", targets, want)
-		}
-	}
-}
-
 func TestCodexGitHubRepos_ReturnsReposAndBoundsResults(t *testing.T) {
 	tmpDir := t.TempDir()
 	ghDir := filepath.Join(tmpDir, "bin")

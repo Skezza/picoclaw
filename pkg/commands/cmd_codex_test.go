@@ -174,7 +174,7 @@ func TestCodexStatus_NoActiveSession(t *testing.T) {
 	if res.Outcome != OutcomeHandled {
 		t.Fatalf("outcome=%v, want=%v", res.Outcome, OutcomeHandled)
 	}
-	if reply != "No active codex session in this chat. Use /codex new or /codex attach." {
+	if reply != "No active codex session in this chat. Use /codex new or /codex resume." {
 		t.Fatalf("reply=%q, want inactive message", reply)
 	}
 }
@@ -678,14 +678,9 @@ func TestCodexConversationalFallback_IntentCanCreateFromRepoDiscovery(t *testing
 
 func TestCodexStop_ClearsSession(t *testing.T) {
 	runStopped := false
-	sessionStopped := false
 	rt := &Runtime{
 		CodexRunStop: func() error {
 			runStopped = true
-			return nil
-		},
-		CodexStop: func() error {
-			sessionStopped = true
 			return nil
 		},
 	}
@@ -704,9 +699,6 @@ func TestCodexStop_ClearsSession(t *testing.T) {
 	}
 	if !runStopped {
 		t.Fatal("CodexRunStop callback was not called")
-	}
-	if sessionStopped {
-		t.Fatal("CodexStop fallback should not be called when CodexRunStop is available")
 	}
 	if reply != "Codex run stopped. Session routing returned to default." {
 		t.Fatalf("reply=%q, want stop confirmation", reply)

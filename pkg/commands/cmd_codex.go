@@ -65,35 +65,11 @@ func codexCommand() Definition {
 					return req.Reply(formatCodexActivatedMessage(info, plannerModel, executorModel))
 				},
 			},
-				{
-					Name:        "attach",
-					Description: "Attach this chat to an existing Codex session",
-					ArgsUsage:   "<session-id|repo-slug>",
-					Handler:     attachHandler("attach"),
-				},
 			{
 				Name:        "resume",
-				Description: "Alias for /codex attach",
+				Description: "Resume an existing Codex session",
 				ArgsUsage:   "<session-id|repo-slug>",
-				Handler: func(_ context.Context, req Request, rt *Runtime) error {
-					if rt == nil || rt.CodexAttach == nil {
-						return req.Reply(unavailableMsg)
-					}
-					executorModel := codexExecutorModel(rt)
-					if executorModel == "" {
-						return req.Reply("Codex mode unavailable: no codex-cli model is configured.")
-					}
-					ref := strings.TrimSpace(nthToken(req.Text, 2))
-					if ref == "" {
-						return req.Reply("Usage: /codex resume <session-id|repo-slug>")
-					}
-					info, err := rt.CodexAttach(ref)
-					if err != nil {
-						return req.Reply(err.Error())
-					}
-					_, plannerModel, _ := codexPlannerState(rt)
-					return req.Reply(formatCodexActivatedMessage(info, plannerModel, executorModel))
-				},
+				Handler:     attachHandler("resume"),
 			},
 			{
 				Name:        "projects",
@@ -168,16 +144,16 @@ func codexCommand() Definition {
 					return req.Reply(strings.Join(lines, "\n"))
 				},
 			},
-				{
-					Name:        "plan",
-					Description: "Refine the active Codex plan",
+			{
+				Name:        "plan",
+				Description: "Refine the active Codex plan",
 				Handler: func(_ context.Context, req Request, rt *Runtime) error {
 					if rt == nil || rt.CodexActive == nil || rt.SetSessionWorkMode == nil {
 						return req.Reply(unavailableMsg)
 					}
 					info, ok := rt.CodexActive()
 					if !ok || info == nil {
-						return req.Reply("No active codex session in this chat. Use /codex new or /codex attach first.")
+						return req.Reply("No active codex session in this chat. Use /codex new or /codex resume first.")
 					}
 					if rt.ClearCodexApprovalPending != nil {
 						rt.ClearCodexApprovalPending()
@@ -188,9 +164,9 @@ func codexCommand() Definition {
 					return req.Reply("Codex planning mode enabled. I will discuss and refine a plan only. When the plan is ready, I will ask you to reply `proceed` to execute it.")
 				},
 			},
-				{
-					Name:        "guide",
-					Description: "Show recommended conversational /codex workflow",
+			{
+				Name:        "guide",
+				Description: "Show recommended conversational /codex workflow",
 				Handler: func(_ context.Context, req Request, rt *Runtime) error {
 					lines := []string{
 						"Conversational /codex quick start:",
@@ -202,16 +178,16 @@ func codexCommand() Definition {
 						"Optional controls:",
 						"- /codex new owner/repo",
 						"- /codex resume <session-id|repo-slug>",
-							"- /codex status",
-							"- /codex runs",
-							"- /codex tail [run-id] [lines]",
-							"- /codex plan",
-							"- /codex repos [limit]",
-							"- /codex projects",
-						}
-						return req.Reply(strings.Join(lines, "\n"))
-					},
+						"- /codex status",
+						"- /codex runs",
+						"- /codex tail [run-id] [lines]",
+						"- /codex plan",
+						"- /codex repos [limit]",
+						"- /codex projects",
+					}
+					return req.Reply(strings.Join(lines, "\n"))
 				},
+			},
 			{
 				Name:        "status",
 				Description: "Show current Codex planner and run state",
@@ -221,7 +197,7 @@ func codexCommand() Definition {
 					}
 					info, ok := rt.CodexActive()
 					if !ok || info == nil {
-						return req.Reply("No active codex session in this chat. Use /codex new or /codex attach.")
+						return req.Reply("No active codex session in this chat. Use /codex new or /codex resume.")
 					}
 					phase, model, planner := codexPlannerState(rt)
 					run := codexActiveRunState(rt)
@@ -338,22 +314,13 @@ func codexCommand() Definition {
 				Name:        "stop",
 				Description: "Stop the active Codex run and detach this chat",
 				Handler: func(_ context.Context, req Request, rt *Runtime) error {
-					if rt == nil {
+					if rt == nil || rt.CodexRunStop == nil {
 						return req.Reply(unavailableMsg)
 					}
-					if rt.CodexRunStop != nil {
-						if err := rt.CodexRunStop(); err != nil {
-							return req.Reply(err.Error())
-						}
-						return req.Reply("Codex run stopped. Session routing returned to default.")
-					}
-					if rt.CodexStop == nil {
-						return req.Reply(unavailableMsg)
-					}
-					if err := rt.CodexStop(); err != nil {
+					if err := rt.CodexRunStop(); err != nil {
 						return req.Reply(err.Error())
 					}
-					return req.Reply("Codex run stop requested. Session routing returned to default.")
+					return req.Reply("Codex run stopped. Session routing returned to default.")
 				},
 			},
 		},
@@ -441,7 +408,7 @@ func legacyRemovedCodexControl(intent string) bool {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(nthToken(intent, 0))) {
-	case "use", "list", "help", "models", "execute", "delegate":
+	case "attach", "use", "list", "help", "models", "execute", "delegate":
 		return true
 	default:
 		return false
@@ -456,9 +423,7 @@ func codexExecutorModel(rt *Runtime) string {
 }
 
 func codexPhaseLabel(workMode string, approvalPending bool) string {
-	switch strings.ToLower(strings.TrimSpace(workMode)) {
-	case "codex":
-		return "executing"
+	switch normalizeCodexWorkMode(workMode) {
 	case "codex-plan":
 		if approvalPending {
 			return "awaiting approval"
@@ -470,6 +435,14 @@ func codexPhaseLabel(workMode string, approvalPending bool) string {
 		}
 		return "inactive"
 	}
+}
+
+func normalizeCodexWorkMode(workMode string) string {
+	workMode = strings.ToLower(strings.TrimSpace(workMode))
+	if workMode == "codex" {
+		return "codex-plan"
+	}
+	return workMode
 }
 
 func codexPlannerState(rt *Runtime) (phase, model string, planner *CodexPlannerStatusInfo) {

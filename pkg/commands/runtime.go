@@ -73,17 +73,15 @@ type Runtime struct {
 	GetCodexApprovalPending   func() bool
 	ClearCodexApprovalPending func()
 
-	FindCodexModel           func() string
-	ListCodexDelegateTargets func() []string
-	ListCodexRepoTargets     func(limit int) ([]string, error)
-	CodexNewSession          func(slug, source string) (*CodexSessionInfo, error)
-	CodexAttach              func(ref string) (*CodexSessionInfo, error)
-	CodexListSessions        func() []CodexSessionInfo
-	CodexActive              func() (*CodexSessionInfo, bool)
-	CodexPlannerStatus       func() (*CodexPlannerStatusInfo, bool)
-	CodexRunList             func() []CodexRunInfo
-	CodexRunStatus           func() (*CodexRunInfo, bool)
-	CodexRunTail             func(runID string, lines int) (string, error)
-	CodexRunStop             func() error
-	CodexStop                func() error
+	FindCodexModel       func() string
+	ListCodexRepoTargets func(limit int) ([]string, error)
+	CodexNewSession      func(slug, source string) (*CodexSessionInfo, error)
+	CodexAttach          func(ref string) (*CodexSessionInfo, error)
+	CodexListSessions    func() []CodexSessionInfo
+	CodexActive          func() (*CodexSessionInfo, bool)
+	CodexPlannerStatus   func() (*CodexPlannerStatusInfo, bool)
+	CodexRunList         func() []CodexRunInfo
+	CodexRunStatus       func() (*CodexRunInfo, bool)
+	CodexRunTail         func(runID string, lines int) (string, error)
+	CodexRunStop         func() error
 }
