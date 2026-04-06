@@ -45,6 +45,7 @@ type codexSessionSnapshot struct {
 	Version  int                            `json:"version"`
 	Sessions map[string]*codexSessionRecord `json:"sessions"`
 	Bindings map[string]string              `json:"bindings"`
+	Recent   map[string][]string            `json:"recent,omitempty"`
 }
 
 type codexSessionStore struct {
@@ -70,9 +71,10 @@ func newCodexSessionStore(workspace string) *codexSessionStore {
 		reposRoot:     filepath.Join(workspace, "repos"),
 		worktreesRoot: filepath.Join(workspace, "worktrees"),
 		state: codexSessionSnapshot{
-			Version:  1,
+			Version:  2,
 			Sessions: make(map[string]*codexSessionRecord),
 			Bindings: make(map[string]string),
+			Recent:   make(map[string][]string),
 		},
 		runs: codexRunSnapshot{
 			Version:         1,
@@ -126,8 +128,11 @@ func (s *codexSessionStore) load() error {
 	if snapshot.Bindings == nil {
 		snapshot.Bindings = make(map[string]string)
 	}
+	if snapshot.Recent == nil {
+		snapshot.Recent = make(map[string][]string)
+	}
 	if snapshot.Version == 0 {
-		snapshot.Version = 1
+		snapshot.Version = 2
 	}
 	s.state = snapshot
 	s.normalizeSessionStateLocked()
@@ -239,7 +244,7 @@ func (s *codexSessionStore) CreateOrActivate(scopeKey, slug, source string) (*co
 		current.RepoURL = sanitizeRepoRemote(repoURL)
 	}
 	current.UpdatedAt = time.Now().UTC()
-	s.state.Bindings[scopeKey] = current.ID
+	s.touchScopeSessionLocked(scopeKey, current.ID)
 
 	if err := s.saveLocked(); err != nil {
 		return nil, err
@@ -275,7 +280,7 @@ func (s *codexSessionStore) Attach(scopeKey, ref string) (*codexSessionRecord, e
 	if rec.RepoURL != "" {
 		rec.RepoURL = sanitizeRepoRemote(rec.RepoURL)
 	}
-	s.state.Bindings[scopeKey] = rec.ID
+	s.touchScopeSessionLocked(scopeKey, rec.ID)
 	if err := s.saveLocked(); err != nil {
 		return nil, err
 	}
@@ -307,6 +312,31 @@ func (s *codexSessionStore) List(scopeKey string) []codexSessionRecord {
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	if scopeKey != "" {
+		recent := s.state.Recent[scopeKey]
+		if len(recent) == 0 {
+			return nil
+		}
+		result := make([]codexSessionRecord, 0, len(recent))
+		seen := make(map[string]struct{}, len(recent))
+		for _, id := range recent {
+			id = strings.TrimSpace(id)
+			if id == "" {
+				continue
+			}
+			if _, exists := seen[id]; exists {
+				continue
+			}
+			rec := s.state.Sessions[id]
+			if rec == nil {
+				continue
+			}
+			seen[id] = struct{}{}
+			result = append(result, *rec)
+		}
+		return result
+	}
 
 	result := make([]codexSessionRecord, 0, len(s.state.Sessions))
 	for _, rec := range s.state.Sessions {
@@ -347,6 +377,29 @@ func (s *codexSessionStore) findBySlugLocked(slug string) *codexSessionRecord {
 		}
 	}
 	return nil
+}
+
+func (s *codexSessionStore) touchScopeSessionLocked(scopeKey, sessionID string) {
+	scopeKey = strings.TrimSpace(scopeKey)
+	sessionID = strings.TrimSpace(sessionID)
+	if scopeKey == "" || sessionID == "" {
+		return
+	}
+	s.state.Bindings[scopeKey] = sessionID
+	recent := s.state.Recent[scopeKey]
+	next := make([]string, 0, len(recent)+1)
+	next = append(next, sessionID)
+	for _, existing := range recent {
+		existing = strings.TrimSpace(existing)
+		if existing == "" || existing == sessionID {
+			continue
+		}
+		next = append(next, existing)
+		if len(next) >= 20 {
+			break
+		}
+	}
+	s.state.Recent[scopeKey] = next
 }
 
 func (s *codexSessionStore) repoPathForSlug(slug string) (string, error) {
@@ -508,6 +561,9 @@ func (s *codexSessionStore) normalizeSessionStateLocked() {
 	if s.state.Bindings == nil {
 		s.state.Bindings = make(map[string]string)
 	}
+	if s.state.Recent == nil {
+		s.state.Recent = make(map[string][]string)
+	}
 	for _, rec := range s.state.Sessions {
 		if rec == nil {
 			continue
@@ -611,6 +667,27 @@ func (al *AgentLoop) codexListRuntimeInfo(sessionKey string) []commands.CodexSes
 			RepoURL:  rec.RepoURL,
 			Updated:  rec.UpdatedAt,
 			Active:   active,
+		})
+	}
+	return result
+}
+
+func (al *AgentLoop) codexListGlobalRuntimeInfo() []commands.CodexSessionInfo {
+	if al == nil || al.codexStore == nil {
+		return nil
+	}
+
+	records := al.codexStore.List("")
+	result := make([]commands.CodexSessionInfo, 0, len(records))
+	for i := range records {
+		rec := records[i]
+		result = append(result, commands.CodexSessionInfo{
+			ID:       rec.ID,
+			Slug:     rec.Slug,
+			RepoPath: rec.RepoPath,
+			RepoURL:  rec.RepoURL,
+			Updated:  rec.UpdatedAt,
+			Active:   false,
 		})
 	}
 	return result

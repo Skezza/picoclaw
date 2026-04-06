@@ -582,9 +582,56 @@ func TestCodexConversationalFallback_BareCodexResumesMostRecent(t *testing.T) {
 	for _, want := range []string{
 		"Codex conversational mode is ready.",
 		"Repo: skezos",
-		"Resumed most recent project: skezos.",
+		"Resumed this chat's most recent project: skezos.",
 		"Phase: planning",
 		"Talk normally now",
+	} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply=%q, missing %q", reply, want)
+		}
+	}
+}
+
+func TestCodexConversationalFallback_IntentMatchesGlobalSessionCatalog(t *testing.T) {
+	var attachRef string
+	rt := &Runtime{
+		FindCodexModel: func() string { return "gpt-5.4-mini" },
+		CodexActive: func() (*CodexSessionInfo, bool) {
+			return nil, false
+		},
+		CodexListSessions: func() []CodexSessionInfo {
+			return nil
+		},
+		CodexListGlobalSessions: func() []CodexSessionInfo {
+			return []CodexSessionInfo{
+				{ID: "p1", Slug: "picoclaw", RepoPath: "/workspace/repos/picoclaw"},
+				{ID: "s1", Slug: "skezos", RepoPath: "/workspace/repos/skezos"},
+			}
+		},
+		CodexAttach: func(ref string) (*CodexSessionInfo, error) {
+			attachRef = ref
+			return &CodexSessionInfo{ID: "s1", Slug: "skezos", RepoPath: "/workspace/repos/skezos"}, nil
+		},
+	}
+	ex := NewExecutor(NewRegistry(BuiltinDefinitions()), rt)
+
+	var reply string
+	res := ex.Execute(context.Background(), Request{
+		Text: "/codex I want you to reopen my old SkezOS session",
+		Reply: func(text string) error {
+			reply = text
+			return nil
+		},
+	})
+	if res.Outcome != OutcomeHandled {
+		t.Fatalf("outcome=%v, want=%v", res.Outcome, OutcomeHandled)
+	}
+	if attachRef != "s1" {
+		t.Fatalf("attach ref=%q, want=%q", attachRef, "s1")
+	}
+	for _, want := range []string{
+		"Matched existing project from your global codex history: skezos.",
+		"planning brief",
 	} {
 		if !strings.Contains(reply, want) {
 			t.Fatalf("reply=%q, missing %q", reply, want)
@@ -633,6 +680,45 @@ func TestCodexConversationalFallback_IntentMatchesExistingSession(t *testing.T) 
 		if !strings.Contains(reply, want) {
 			t.Fatalf("reply=%q, missing %q", reply, want)
 		}
+	}
+}
+
+func TestCodexConversationalFallback_BareCodexDoesNotAutoResumeGlobalHistory(t *testing.T) {
+	attachCalled := false
+	rt := &Runtime{
+		FindCodexModel: func() string { return "gpt-5.4-mini" },
+		CodexActive: func() (*CodexSessionInfo, bool) {
+			return nil, false
+		},
+		CodexListSessions: func() []CodexSessionInfo { return nil },
+		CodexListGlobalSessions: func() []CodexSessionInfo {
+			return []CodexSessionInfo{
+				{ID: "s1", Slug: "skezos", RepoPath: "/workspace/repos/skezos"},
+			}
+		},
+		CodexAttach: func(ref string) (*CodexSessionInfo, error) {
+			attachCalled = true
+			return &CodexSessionInfo{ID: ref, Slug: "skezos", RepoPath: "/workspace/repos/skezos"}, nil
+		},
+	}
+	ex := NewExecutor(NewRegistry(BuiltinDefinitions()), rt)
+
+	var reply string
+	res := ex.Execute(context.Background(), Request{
+		Text: "/codex",
+		Reply: func(text string) error {
+			reply = text
+			return nil
+		},
+	})
+	if res.Outcome != OutcomeHandled {
+		t.Fatalf("outcome=%v, want=%v", res.Outcome, OutcomeHandled)
+	}
+	if attachCalled {
+		t.Fatal("expected bare /codex not to auto-attach from global history")
+	}
+	if reply != "No codex session is active yet. Start one with /codex new owner/repo, then chat normally." {
+		t.Fatalf("reply=%q, want no-active-session guidance", reply)
 	}
 }
 

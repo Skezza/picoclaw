@@ -268,6 +268,69 @@ func TestCodexSessionStore_ActiveRunReturnsClone(t *testing.T) {
 	}
 }
 
+func TestCodexSessionStore_ListIsScopedByChatRecentHistory(t *testing.T) {
+	workspace := t.TempDir()
+	store := newCodexSessionStore(workspace)
+	if store == nil {
+		t.Fatal("expected codex session store")
+	}
+
+	scopeA := "agent:test:chat-a"
+	scopeB := "agent:test:chat-b"
+	for _, slug := range []string{"picoclaw", "skezos", "docs"} {
+		repoPath, err := store.repoPathForSlug(slug)
+		if err != nil {
+			t.Fatalf("repoPathForSlug(%q) error = %v", slug, err)
+		}
+		if err := initGitRepo(t, repoPath); err != nil {
+			t.Fatalf("initGitRepo(%q) error = %v", slug, err)
+		}
+	}
+
+	picoclaw, err := store.CreateOrActivate(scopeA, "picoclaw", "")
+	if err != nil {
+		t.Fatalf("CreateOrActivate(picoclaw) error = %v", err)
+	}
+	skezos, err := store.CreateOrActivate(scopeA, "skezos", "")
+	if err != nil {
+		t.Fatalf("CreateOrActivate(skezos) error = %v", err)
+	}
+	docs, err := store.CreateOrActivate(scopeB, "docs", "")
+	if err != nil {
+		t.Fatalf("CreateOrActivate(docs) error = %v", err)
+	}
+	if _, err := store.Attach(scopeA, picoclaw.ID); err != nil {
+		t.Fatalf("Attach(picoclaw) error = %v", err)
+	}
+
+	listA := store.List(scopeA)
+	if len(listA) != 2 {
+		t.Fatalf("List(scopeA) len=%d, want 2", len(listA))
+	}
+	if listA[0].Slug != "picoclaw" || listA[1].Slug != "skezos" {
+		t.Fatalf("List(scopeA) = [%s, %s], want [picoclaw, skezos]", listA[0].Slug, listA[1].Slug)
+	}
+
+	listB := store.List(scopeB)
+	if len(listB) != 1 || listB[0].Slug != "docs" {
+		t.Fatalf("List(scopeB) = %+v, want only docs", listB)
+	}
+
+	global := store.List("")
+	if len(global) != 3 {
+		t.Fatalf("List(\"\") len=%d, want 3", len(global))
+	}
+	got := map[string]bool{}
+	for _, rec := range global {
+		got[rec.Slug] = true
+	}
+	for _, want := range []string{picoclaw.Slug, skezos.Slug, docs.Slug} {
+		if !got[want] {
+			t.Fatalf("global list missing %q: %+v", want, global)
+		}
+	}
+}
+
 func TestIsPicoClawRun_MatchesExactRepoIdentity(t *testing.T) {
 	tests := []struct {
 		name string

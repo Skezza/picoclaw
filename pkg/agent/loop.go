@@ -3918,6 +3918,9 @@ func (al *AgentLoop) buildCommandsRuntime(agent *AgentInstance, opts *processOpt
 			}
 			return al.codexListRuntimeInfo(opts.SessionKey)
 		}
+		rt.CodexListGlobalSessions = func() []commands.CodexSessionInfo {
+			return al.codexListGlobalRuntimeInfo()
+		}
 		rt.CodexActive = func() (*commands.CodexSessionInfo, bool) {
 			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
 				return nil, false

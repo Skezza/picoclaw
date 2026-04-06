@@ -583,12 +583,29 @@ func activateCodexSessionForConversationalEntry(rt *Runtime, intent string) (*Co
 				return nil, "", fmt.Errorf("multiple codex projects matched (%s). Use /codex resume <repo-slug>.", strings.Join(ambiguous, ", "))
 			}
 
-			latest := sessions[0]
-			info, err := rt.CodexAttach(latest.ID)
-			if err != nil {
-				return nil, "", err
+			if intent == "" {
+				latest := sessions[0]
+				info, err := rt.CodexAttach(latest.ID)
+				if err != nil {
+					return nil, "", err
+				}
+				return info, fmt.Sprintf("Resumed this chat's most recent project: %s.", latest.Slug), nil
 			}
-			return info, fmt.Sprintf("Resumed most recent project: %s.", latest.Slug), nil
+		}
+	}
+
+	if intent != "" && rt.CodexListGlobalSessions != nil && rt.CodexAttach != nil {
+		sessions := rt.CodexListGlobalSessions()
+		if len(sessions) > 0 {
+			if matched, ambiguous := matchCodexSessionByIntent(intent, sessions); matched != nil {
+				info, err := rt.CodexAttach(matched.ID)
+				if err != nil {
+					return nil, "", err
+				}
+				return info, fmt.Sprintf("Matched existing project from your global codex history: %s.", matched.Slug), nil
+			} else if len(ambiguous) > 0 {
+				return nil, "", fmt.Errorf("multiple codex projects matched (%s). Use /codex resume <repo-slug>.", strings.Join(ambiguous, ", "))
+			}
 		}
 	}
 
