@@ -65,18 +65,12 @@ func codexCommand() Definition {
 					return req.Reply(formatCodexActivatedMessage(info, plannerModel, executorModel))
 				},
 			},
-			{
-				Name:        "attach",
-				Description: "Attach this chat to an existing Codex session",
-				ArgsUsage:   "<session-id|repo-slug>",
-				Handler:     attachHandler("attach"),
-			},
-			{
-				Name:        "use",
-				Description: "Alias for /codex attach",
-				ArgsUsage:   "<session-id|repo-slug>",
-				Handler:     attachHandler("use"),
-			},
+				{
+					Name:        "attach",
+					Description: "Attach this chat to an existing Codex session",
+					ArgsUsage:   "<session-id|repo-slug>",
+					Handler:     attachHandler("attach"),
+				},
 			{
 				Name:        "resume",
 				Description: "Alias for /codex attach",
@@ -174,88 +168,9 @@ func codexCommand() Definition {
 					return req.Reply(strings.Join(lines, "\n"))
 				},
 			},
-			{
-				Name:        "list",
-				Description: "List known Codex sessions",
-				Handler: func(_ context.Context, req Request, rt *Runtime) error {
-					if rt == nil || rt.CodexListSessions == nil {
-						return req.Reply(unavailableMsg)
-					}
-					sessions := rt.CodexListSessions()
-					if len(sessions) == 0 {
-						return req.Reply("No codex sessions yet. Start one with /codex new <repo-slug> [repo-url].")
-					}
-
-					lines := make([]string, 0, len(sessions)+1)
-					lines = append(lines, "Codex sessions:")
-					for _, s := range sessions {
-						flag := ""
-						if s.Active {
-							flag = " [active]"
-						}
-						updated := ""
-						if !s.Updated.IsZero() {
-							updated = " @ " + s.Updated.Format(time.RFC3339)
-						}
-						lines = append(lines, fmt.Sprintf("- %s %s%s%s", s.ID, s.Slug, flag, updated))
-					}
-					return req.Reply(strings.Join(lines, "\n"))
-				},
-			},
-			{
-				Name:        "models",
-				Description: "Show Codex model and delegation state",
-				Handler: func(_ context.Context, req Request, rt *Runtime) error {
-					if rt == nil {
-						return req.Reply(unavailableMsg)
-					}
-
-					defaultModel := ""
-					if rt.FindCodexModel != nil {
-						defaultModel = strings.TrimSpace(rt.FindCodexModel())
-					}
-					persistent, pending := "", ""
-					if rt.GetSessionModelMode != nil {
-						persistent, pending = rt.GetSessionModelMode()
-					}
-					workMode := ""
-					if rt.GetSessionWorkMode != nil {
-						workMode = strings.TrimSpace(rt.GetSessionWorkMode())
-					}
-
-					lines := []string{"Codex model settings:"}
-					if defaultModel != "" {
-						lines = append(lines, fmt.Sprintf("- Default: %s", defaultModel))
-					} else {
-						lines = append(lines, "- Default: unavailable")
-					}
-					if persistent != "" {
-						lines = append(lines, fmt.Sprintf("- Session: %s", persistent))
-					} else {
-						lines = append(lines, "- Session: default routing")
-					}
-					if pending != "" {
-						lines = append(lines, fmt.Sprintf("- Pending: %s", pending))
-					} else {
-						lines = append(lines, "- Pending: none")
-					}
-					if workMode != "" {
-						lines = append(lines, fmt.Sprintf("- Work mode: %s", workMode))
-					}
-
-					targets := codexDelegateTargets(rt)
-					if len(targets) == 0 {
-						lines = append(lines, "- Delegate targets: none configured")
-					} else {
-						lines = append(lines, fmt.Sprintf("- Delegate targets: %s", strings.Join(targets, ", ")))
-					}
-
-					return req.Reply(strings.Join(lines, "\n"))
-				},
-			},
-			{
-				Name:        "plan",
-				Description: "Refine the active Codex plan",
+				{
+					Name:        "plan",
+					Description: "Refine the active Codex plan",
 				Handler: func(_ context.Context, req Request, rt *Runtime) error {
 					if rt == nil || rt.CodexActive == nil || rt.SetSessionWorkMode == nil {
 						return req.Reply(unavailableMsg)
@@ -273,29 +188,9 @@ func codexCommand() Definition {
 					return req.Reply("Codex planning mode enabled. I will discuss and refine a plan only. When the plan is ready, I will ask you to reply `proceed` to execute it.")
 				},
 			},
-			{
-				Name:        "execute",
-				Description: "Arm the active Codex session for run execution",
-				Handler: func(_ context.Context, req Request, rt *Runtime) error {
-					if rt == nil || rt.CodexActive == nil || rt.SetSessionWorkMode == nil {
-						return req.Reply(unavailableMsg)
-					}
-					info, ok := rt.CodexActive()
-					if !ok || info == nil {
-						return req.Reply("No active codex session in this chat. Use /codex new or /codex attach first.")
-					}
-					if rt.ClearCodexApprovalPending != nil {
-						rt.ClearCodexApprovalPending()
-					}
-					if err := rt.SetSessionWorkMode("codex-plan"); err != nil {
-						return req.Reply(err.Error())
-					}
-					return req.Reply("Codex run execution is armed. Keep planning in chat, then reply `proceed` when you want me to launch the approved run.")
-				},
-			},
-			{
-				Name:        "guide",
-				Description: "Show recommended conversational /codex workflow",
+				{
+					Name:        "guide",
+					Description: "Show recommended conversational /codex workflow",
 				Handler: func(_ context.Context, req Request, rt *Runtime) error {
 					lines := []string{
 						"Conversational /codex quick start:",
@@ -307,87 +202,16 @@ func codexCommand() Definition {
 						"Optional controls:",
 						"- /codex new owner/repo",
 						"- /codex resume <session-id|repo-slug>",
-						"- /codex status",
-						"- /codex runs",
-						"- /codex tail [run-id] [lines]",
-						"- /codex plan",
-						"- /codex repos [limit]",
-						"- /codex models",
-					}
-					return req.Reply(strings.Join(lines, "\n"))
+							"- /codex status",
+							"- /codex runs",
+							"- /codex tail [run-id] [lines]",
+							"- /codex plan",
+							"- /codex repos [limit]",
+							"- /codex projects",
+						}
+						return req.Reply(strings.Join(lines, "\n"))
+					},
 				},
-			},
-			{
-				Name:        "help",
-				Description: "Alias for /codex guide",
-				Handler: func(_ context.Context, req Request, rt *Runtime) error {
-					lines := []string{
-						"Conversational /codex quick start:",
-						"1) Send /codex once. It resumes your most recent project when possible, otherwise it helps you pick one.",
-						"2) Then chat normally, e.g. \"Open SkezOS, review latest changes, and propose the next feature.\"",
-						"3) I stay in planning mode first. When the plan is ready, I will tell you to reply `proceed`.",
-						"4) Reply `proceed` and I will launch the approved Codex run in the active repo session.",
-						"",
-						"Optional controls:",
-						"- /codex new owner/repo",
-						"- /codex resume <session-id|repo-slug>",
-						"- /codex status",
-						"- /codex runs",
-						"- /codex tail [run-id] [lines]",
-						"- /codex plan",
-						"- /codex repos [limit]",
-						"- /codex models",
-					}
-					return req.Reply(strings.Join(lines, "\n"))
-				},
-			},
-			{
-				Name:        "delegate",
-				Description: "Delegate the active codex session to a model",
-				ArgsUsage:   "<model> [next|session]",
-				Handler: func(_ context.Context, req Request, rt *Runtime) error {
-					if rt == nil || rt.CodexActive == nil {
-						return req.Reply(unavailableMsg)
-					}
-					info, ok := rt.CodexActive()
-					if !ok || info == nil {
-						return req.Reply("No active codex session in this chat. Use /codex new or /codex attach first.")
-					}
-
-					model := strings.TrimSpace(nthToken(req.Text, 2))
-					if model == "" {
-						return req.Reply("Usage: /codex delegate <model> [next|session]")
-					}
-					mode := strings.ToLower(strings.TrimSpace(nthToken(req.Text, 3)))
-					if mode == "" {
-						mode = "next"
-					}
-					targets := codexDelegateTargets(rt)
-					if len(targets) > 0 && !containsStringFold(targets, model) {
-						return req.Reply(fmt.Sprintf("Model %q is not an allowed delegate target. Use /codex models to view targets.", model))
-					}
-					switch mode {
-					case "next":
-						if rt.ArmNextModelMode == nil {
-							return req.Reply("Codex delegation unavailable: next-message model callback is not configured.")
-						}
-						if err := rt.ArmNextModelMode(model); err != nil {
-							return req.Reply(err.Error())
-						}
-						return req.Reply(fmt.Sprintf("Codex delegation armed for next message: %s", model))
-					case "session":
-						if rt.SetSessionModelMode == nil {
-							return req.Reply("Codex delegation unavailable: session model callback is not configured.")
-						}
-						if err := rt.SetSessionModelMode(model); err != nil {
-							return req.Reply(err.Error())
-						}
-						return req.Reply(fmt.Sprintf("Codex session model set to %s.", model))
-					default:
-						return req.Reply("Usage: /codex delegate <model> [next|session]")
-					}
-				},
-			},
 			{
 				Name:        "status",
 				Description: "Show current Codex planner and run state",
@@ -536,65 +360,6 @@ func codexCommand() Definition {
 	}
 }
 
-func codexDelegateTargets(rt *Runtime) []string {
-	if rt == nil {
-		return nil
-	}
-	if rt.ListCodexDelegateTargets != nil {
-		targets := rt.ListCodexDelegateTargets()
-		if len(targets) == 0 {
-			return nil
-		}
-		dedup := make(map[string]struct{}, len(targets))
-		out := make([]string, 0, len(targets))
-		for _, target := range targets {
-			target = strings.TrimSpace(target)
-			if target == "" {
-				continue
-			}
-			if _, exists := dedup[target]; exists {
-				continue
-			}
-			dedup[target] = struct{}{}
-			out = append(out, target)
-		}
-		return out
-	}
-
-	models := []string{}
-	if rt.FindCodexModel != nil {
-		if model := strings.TrimSpace(rt.FindCodexModel()); model != "" {
-			models = append(models, model)
-		}
-	}
-	if rt.Config != nil {
-		targets := sessionModeTargets(rt)
-		if targets.Fast.Label != "" {
-			models = append(models, targets.Fast.Label)
-		}
-		if targets.Heavy.Label != "" {
-			models = append(models, targets.Heavy.Label)
-		}
-		if targets.Tools.Label != "" {
-			models = append(models, targets.Tools.Label)
-		}
-		if targets.Free.Label != "" {
-			models = append(models, targets.Free.Label)
-		}
-	}
-
-	dedup := make(map[string]struct{}, len(models))
-	out := make([]string, 0, len(models))
-	for _, model := range models {
-		if _, exists := dedup[model]; exists {
-			continue
-		}
-		dedup[model] = struct{}{}
-		out = append(out, model)
-	}
-	return out
-}
-
 func formatCodexActivatedMessage(info *CodexSessionInfo, plannerModel, executorModel string) string {
 	if info == nil {
 		return "Codex session is active."
@@ -629,6 +394,9 @@ func handleCodexConversationalEntry(req Request, rt *Runtime) error {
 	}
 
 	intent := codexCommandTail(req.Text)
+	if legacyRemovedCodexControl(intent) {
+		return req.Reply("That /codex control was removed. Use /codex and chat normally, or use /codex guide for the supported controls.")
+	}
 	info, note, err := activateCodexSessionForConversationalEntry(rt, intent)
 	if err != nil {
 		return req.Reply(err.Error())
@@ -665,6 +433,19 @@ func handleCodexConversationalEntry(req Request, rt *Runtime) error {
 		lines = append(lines, `I captured your kickoff request. Send it again without "/codex" and I will use it as the planning brief for this repo session.`)
 	}
 	return req.Reply(strings.Join(lines, "\n"))
+}
+
+func legacyRemovedCodexControl(intent string) bool {
+	intent = strings.TrimSpace(intent)
+	if intent == "" {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(nthToken(intent, 0))) {
+	case "use", "list", "help", "models", "execute", "delegate":
+		return true
+	default:
+		return false
+	}
 }
 
 func codexExecutorModel(rt *Runtime) string {

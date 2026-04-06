@@ -155,37 +155,6 @@ func TestCodexNew_InferURLSource(t *testing.T) {
 	}
 }
 
-func TestCodexList_IncludesActiveMarker(t *testing.T) {
-	now := time.Date(2026, 4, 6, 14, 0, 0, 0, time.UTC)
-	rt := &Runtime{
-		CodexListSessions: func() []CodexSessionInfo {
-			return []CodexSessionInfo{
-				{ID: "a1", Slug: "picoclaw", Active: true, Updated: now},
-				{ID: "b2", Slug: "docs"},
-			}
-		},
-	}
-	ex := NewExecutor(NewRegistry(BuiltinDefinitions()), rt)
-
-	var reply string
-	res := ex.Execute(context.Background(), Request{
-		Text: "/codex list",
-		Reply: func(text string) error {
-			reply = text
-			return nil
-		},
-	})
-	if res.Outcome != OutcomeHandled {
-		t.Fatalf("outcome=%v, want=%v", res.Outcome, OutcomeHandled)
-	}
-	if !strings.Contains(reply, "a1 picoclaw [active] @ 2026-04-06T14:00:00Z") {
-		t.Fatalf("reply=%q, expected active listing", reply)
-	}
-	if !strings.Contains(reply, "b2 docs") {
-		t.Fatalf("reply=%q, expected secondary listing", reply)
-	}
-}
-
 func TestCodexStatus_NoActiveSession(t *testing.T) {
 	rt := &Runtime{
 		CodexActive: func() (*CodexSessionInfo, bool) {
@@ -326,36 +295,6 @@ func TestCodexResume_UsesAttach(t *testing.T) {
 	}
 }
 
-func TestCodexUse_AliasForAttach(t *testing.T) {
-	var gotRef string
-	rt := &Runtime{
-		FindCodexModel: func() string { return "codex-local" },
-		CodexAttach: func(ref string) (*CodexSessionInfo, error) {
-			gotRef = ref
-			return &CodexSessionInfo{ID: "a1", Slug: "picoclaw", RepoPath: "/workspace/repos/picoclaw"}, nil
-		},
-	}
-	ex := NewExecutor(NewRegistry(BuiltinDefinitions()), rt)
-
-	var reply string
-	res := ex.Execute(context.Background(), Request{
-		Text: "/codex use picoclaw",
-		Reply: func(text string) error {
-			reply = text
-			return nil
-		},
-	})
-	if res.Outcome != OutcomeHandled {
-		t.Fatalf("outcome=%v, want=%v", res.Outcome, OutcomeHandled)
-	}
-	if gotRef != "picoclaw" {
-		t.Fatalf("ref=%q, want=%q", gotRef, "picoclaw")
-	}
-	if !strings.Contains(reply, "Codex session is active") {
-		t.Fatalf("reply=%q, expected activation message", reply)
-	}
-}
-
 func TestCodexProjects_ShowsRepoPathsAndRemote(t *testing.T) {
 	now := time.Date(2026, 4, 6, 14, 30, 0, 0, time.UTC)
 	rt := &Runtime{
@@ -444,44 +383,6 @@ func TestCodexRepos_InvalidLimitShowsUsage(t *testing.T) {
 	}
 }
 
-func TestCodexModels_ShowsSessionAndTargets(t *testing.T) {
-	rt := &Runtime{
-		FindCodexModel: func() string { return "gpt-5.4-mini" },
-		GetSessionModelMode: func() (string, string) {
-			return "gpt-5.4-pro", "gpt-5.4-mini"
-		},
-		GetSessionWorkMode: func() string { return "codex" },
-		ListCodexDelegateTargets: func() []string {
-			return []string{"gpt-5.4-mini", "gpt-5.4-pro"}
-		},
-	}
-	ex := NewExecutor(NewRegistry(BuiltinDefinitions()), rt)
-
-	var reply string
-	res := ex.Execute(context.Background(), Request{
-		Text: "/codex models",
-		Reply: func(text string) error {
-			reply = text
-			return nil
-		},
-	})
-	if res.Outcome != OutcomeHandled {
-		t.Fatalf("outcome=%v, want=%v", res.Outcome, OutcomeHandled)
-	}
-	for _, want := range []string{
-		"Codex model settings:",
-		"- Default: gpt-5.4-mini",
-		"- Session: gpt-5.4-pro",
-		"- Pending: gpt-5.4-mini",
-		"- Work mode: codex",
-		"- Delegate targets: gpt-5.4-mini, gpt-5.4-pro",
-	} {
-		if !strings.Contains(reply, want) {
-			t.Fatalf("reply=%q, missing %q", reply, want)
-		}
-	}
-}
-
 func TestCodexPlan_SetsPlanningWorkMode(t *testing.T) {
 	var setMode string
 	cleared := false
@@ -524,45 +425,6 @@ func TestCodexPlan_SetsPlanningWorkMode(t *testing.T) {
 	}
 }
 
-func TestCodexExecute_SetsExecutionWorkMode(t *testing.T) {
-	var setMode string
-	cleared := false
-	rt := &Runtime{
-		CodexActive: func() (*CodexSessionInfo, bool) {
-			return &CodexSessionInfo{ID: "a1", Slug: "picoclaw"}, true
-		},
-		SetSessionWorkMode: func(value string) error {
-			setMode = value
-			return nil
-		},
-		ClearCodexApprovalPending: func() {
-			cleared = true
-		},
-	}
-	ex := NewExecutor(NewRegistry(BuiltinDefinitions()), rt)
-
-	var reply string
-	res := ex.Execute(context.Background(), Request{
-		Text: "/codex execute",
-		Reply: func(text string) error {
-			reply = text
-			return nil
-		},
-	})
-	if res.Outcome != OutcomeHandled {
-		t.Fatalf("outcome=%v, want=%v", res.Outcome, OutcomeHandled)
-	}
-	if setMode != "codex-plan" {
-		t.Fatalf("work mode=%q, want=%q", setMode, "codex-plan")
-	}
-	if !cleared {
-		t.Fatal("expected approval state to be cleared")
-	}
-	if !strings.Contains(reply, "launch the approved run") {
-		t.Fatalf("reply=%q, want launch guidance", reply)
-	}
-}
-
 func TestCodexGuide_ContainsPlanAndExecuteFlow(t *testing.T) {
 	rt := &Runtime{}
 	ex := NewExecutor(NewRegistry(BuiltinDefinitions()), rt)
@@ -582,6 +444,28 @@ func TestCodexGuide_ContainsPlanAndExecuteFlow(t *testing.T) {
 		if !strings.Contains(reply, want) {
 			t.Fatalf("reply=%q, missing %q", reply, want)
 		}
+	}
+}
+
+func TestCodexRemovedLegacyControl_ShowsGuidance(t *testing.T) {
+	rt := &Runtime{
+		FindCodexModel: func() string { return "codex-local" },
+	}
+	ex := NewExecutor(NewRegistry(BuiltinDefinitions()), rt)
+
+	var reply string
+	res := ex.Execute(context.Background(), Request{
+		Text: "/codex execute",
+		Reply: func(text string) error {
+			reply = text
+			return nil
+		},
+	})
+	if res.Outcome != OutcomeHandled {
+		t.Fatalf("outcome=%v, want=%v", res.Outcome, OutcomeHandled)
+	}
+	if reply != "That /codex control was removed. Use /codex and chat normally, or use /codex guide for the supported controls." {
+		t.Fatalf("reply=%q, want removed-control guidance", reply)
 	}
 }
 
@@ -789,152 +673,6 @@ func TestCodexConversationalFallback_IntentCanCreateFromRepoDiscovery(t *testing
 	}
 	if !strings.Contains(reply, "Created new project from GitHub repo: joe/SkezOS.") {
 		t.Fatalf("reply=%q, expected repo discovery note", reply)
-	}
-}
-
-func TestCodexDelegate_NextArmsNextModel(t *testing.T) {
-	var armed string
-	rt := &Runtime{
-		CodexActive: func() (*CodexSessionInfo, bool) {
-			return &CodexSessionInfo{ID: "a1", Slug: "picoclaw"}, true
-		},
-		ArmNextModelMode: func(value string) error {
-			armed = value
-			return nil
-		},
-	}
-	ex := NewExecutor(NewRegistry(BuiltinDefinitions()), rt)
-
-	var reply string
-	res := ex.Execute(context.Background(), Request{
-		Text: "/codex delegate gpt-5.4-mini",
-		Reply: func(text string) error {
-			reply = text
-			return nil
-		},
-	})
-	if res.Outcome != OutcomeHandled {
-		t.Fatalf("outcome=%v, want=%v", res.Outcome, OutcomeHandled)
-	}
-	if armed != "gpt-5.4-mini" {
-		t.Fatalf("armed=%q, want=%q", armed, "gpt-5.4-mini")
-	}
-	if reply != "Codex delegation armed for next message: gpt-5.4-mini" {
-		t.Fatalf("reply=%q, want next delegation confirmation", reply)
-	}
-}
-
-func TestCodexDelegate_SessionSetsPersistentModel(t *testing.T) {
-	var set string
-	rt := &Runtime{
-		CodexActive: func() (*CodexSessionInfo, bool) {
-			return &CodexSessionInfo{ID: "a1", Slug: "picoclaw"}, true
-		},
-		SetSessionModelMode: func(value string) error {
-			set = value
-			return nil
-		},
-	}
-	ex := NewExecutor(NewRegistry(BuiltinDefinitions()), rt)
-
-	var reply string
-	res := ex.Execute(context.Background(), Request{
-		Text: "/codex delegate gpt-5.4-pro session",
-		Reply: func(text string) error {
-			reply = text
-			return nil
-		},
-	})
-	if res.Outcome != OutcomeHandled {
-		t.Fatalf("outcome=%v, want=%v", res.Outcome, OutcomeHandled)
-	}
-	if set != "gpt-5.4-pro" {
-		t.Fatalf("set=%q, want=%q", set, "gpt-5.4-pro")
-	}
-	if reply != "Codex session model set to gpt-5.4-pro." {
-		t.Fatalf("reply=%q, want session delegation confirmation", reply)
-	}
-}
-
-func TestCodexDelegate_RequiresActiveSession(t *testing.T) {
-	rt := &Runtime{
-		CodexActive: func() (*CodexSessionInfo, bool) {
-			return nil, false
-		},
-	}
-	ex := NewExecutor(NewRegistry(BuiltinDefinitions()), rt)
-
-	var reply string
-	res := ex.Execute(context.Background(), Request{
-		Text: "/codex delegate gpt-5.4-mini",
-		Reply: func(text string) error {
-			reply = text
-			return nil
-		},
-	})
-	if res.Outcome != OutcomeHandled {
-		t.Fatalf("outcome=%v, want=%v", res.Outcome, OutcomeHandled)
-	}
-	if reply != "No active codex session in this chat. Use /codex new or /codex attach first." {
-		t.Fatalf("reply=%q, want inactive guidance", reply)
-	}
-}
-
-func TestCodexDelegate_PropagatesCallbackErrors(t *testing.T) {
-	rt := &Runtime{
-		CodexActive: func() (*CodexSessionInfo, bool) {
-			return &CodexSessionInfo{ID: "a1", Slug: "picoclaw"}, true
-		},
-		ArmNextModelMode: func(value string) error {
-			return context.Canceled
-		},
-	}
-	ex := NewExecutor(NewRegistry(BuiltinDefinitions()), rt)
-
-	var reply string
-	res := ex.Execute(context.Background(), Request{
-		Text: "/codex delegate gpt-5.4-mini",
-		Reply: func(text string) error {
-			reply = text
-			return nil
-		},
-	})
-	if res.Outcome != OutcomeHandled {
-		t.Fatalf("outcome=%v, want=%v", res.Outcome, OutcomeHandled)
-	}
-	if reply != context.Canceled.Error() {
-		t.Fatalf("reply=%q, want callback error verbatim", reply)
-	}
-}
-
-func TestCodexDelegate_RejectsUnknownModelAgainstTargets(t *testing.T) {
-	rt := &Runtime{
-		CodexActive: func() (*CodexSessionInfo, bool) {
-			return &CodexSessionInfo{ID: "a1", Slug: "picoclaw"}, true
-		},
-		ListCodexDelegateTargets: func() []string {
-			return []string{"gpt-5.4-mini", "gpt-5.4-pro"}
-		},
-		ArmNextModelMode: func(value string) error {
-			t.Fatalf("ArmNextModelMode should not be called for invalid model")
-			return nil
-		},
-	}
-	ex := NewExecutor(NewRegistry(BuiltinDefinitions()), rt)
-
-	var reply string
-	res := ex.Execute(context.Background(), Request{
-		Text: "/codex delegate openrouter-free",
-		Reply: func(text string) error {
-			reply = text
-			return nil
-		},
-	})
-	if res.Outcome != OutcomeHandled {
-		t.Fatalf("outcome=%v, want=%v", res.Outcome, OutcomeHandled)
-	}
-	if !strings.Contains(reply, "is not an allowed delegate target") {
-		t.Fatalf("reply=%q, want delegate allowlist rejection", reply)
 	}
 }
 
