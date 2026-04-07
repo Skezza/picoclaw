@@ -242,17 +242,10 @@ func (al *AgentLoop) startApprovedCodexRun(
 
 	history := agent.Sessions.GetHistory(opts.SessionKey)
 	summary := agent.Sessions.GetSummary(opts.SessionKey)
-	planText := latestAssistantMessage(history)
-	_, latestPlanHash := codexPlanIdentity(planText)
-	if latestPlanHash == "" || (strings.TrimSpace(runtime.PendingPlanHash) != "" && latestPlanHash != strings.TrimSpace(runtime.PendingPlanHash)) {
-		_ = al.codexStore.UpdateSessionRuntime(opts.SessionKey, func(runtime *codexSessionRuntimeState) {
-			runtime.WorkMode = "codex-plan"
-			runtime.ApprovalPending = false
-			runtime.PendingPlanID = ""
-			runtime.PendingPlanHash = ""
-		})
+	_, _, planText, err := al.currentApprovedCodexPlan(opts.SessionKey, history)
+	if err != nil {
 		al.clearCodexApprovalPending(opts.SessionKey)
-		return "The pending codex plan no longer matches the latest planner reply. Review the latest plan and reply `proceed` again.", nil
+		return err.Error(), nil
 	}
 
 	run, err := al.codexStore.CreateRun(opts.SessionKey, codexRunCreateOptions{
@@ -315,6 +308,7 @@ func (al *AgentLoop) startApprovedCodexRun(
 		runtime.ApprovalPending = false
 		runtime.PendingPlanID = ""
 		runtime.PendingPlanHash = ""
+		runtime.PendingPlanText = ""
 		runtime.ActiveRunID = run.ID
 		runtime.LastRunID = run.ID
 		runtime.PlannerModel = plannerModel
@@ -470,6 +464,27 @@ func latestAssistantMessage(history []providers.Message) string {
 	for i := len(history) - 1; i >= 0; i-- {
 		if history[i].Role == "assistant" && strings.TrimSpace(history[i].Content) != "" {
 			return strings.TrimSpace(history[i].Content)
+		}
+	}
+	return ""
+}
+
+func findApprovedCodexPlanInHistory(history []providers.Message, expectedHash string) string {
+	expectedHash = strings.TrimSpace(expectedHash)
+	if expectedHash == "" {
+		return ""
+	}
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role != "assistant" {
+			continue
+		}
+		content := strings.TrimSpace(history[i].Content)
+		if content == "" {
+			continue
+		}
+		_, hash := codexPlanIdentity(content)
+		if hash != "" && strings.EqualFold(hash, expectedHash) {
+			return content
 		}
 	}
 	return ""
