@@ -15,6 +15,13 @@ import (
 
 const defaultGitTimeout = 60 * time.Second
 
+var planningReadOnlyGitActions = map[string]struct{}{
+	"status": {},
+	"branch": {},
+	"log":    {},
+	"diff":   {},
+}
+
 // GitRunner runs git commands. It exists so tests can inject a fake runner.
 type GitRunner interface {
 	Run(ctx context.Context, dir string, args ...string) (string, error)
@@ -153,6 +160,12 @@ func (t *GitTool) Execute(ctx context.Context, args map[string]any) *ToolResult 
 	action, _ := args["action"].(string)
 	if action == "" {
 		return ErrorResult("action is required")
+	}
+	action = strings.ToLower(strings.TrimSpace(action))
+	if strings.EqualFold(strings.TrimSpace(ToolWorkMode(ctx)), "codex-plan") {
+		if _, ok := planningReadOnlyGitActions[action]; !ok {
+			return ErrorResult(fmt.Sprintf("git action %q is not allowed while refining a codex plan; use status, branch, log, or diff", action))
+		}
 	}
 
 	var (

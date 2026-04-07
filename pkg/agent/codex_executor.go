@@ -318,6 +318,7 @@ func (al *AgentLoop) startApprovedCodexRun(
 		runtime.ApprovalPending = false
 		runtime.PendingPlanID = ""
 		runtime.PendingPlanHash = ""
+		runtime.PendingPlanText = ""
 		runtime.ActiveRunID = run.ID
 		runtime.LastRunID = run.ID
 		runtime.PlannerModel = plannerModel
@@ -473,6 +474,27 @@ func latestAssistantMessage(history []providers.Message) string {
 	for i := len(history) - 1; i >= 0; i-- {
 		if history[i].Role == "assistant" && strings.TrimSpace(history[i].Content) != "" {
 			return strings.TrimSpace(history[i].Content)
+		}
+	}
+	return ""
+}
+
+func findApprovedCodexPlanInHistory(history []providers.Message, expectedHash string) string {
+	expectedHash = strings.TrimSpace(expectedHash)
+	if expectedHash == "" {
+		return ""
+	}
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role != "assistant" {
+			continue
+		}
+		content := strings.TrimSpace(history[i].Content)
+		if content == "" {
+			continue
+		}
+		_, hash := codexPlanIdentity(content)
+		if hash != "" && strings.EqualFold(hash, expectedHash) {
+			return content
 		}
 	}
 	return ""

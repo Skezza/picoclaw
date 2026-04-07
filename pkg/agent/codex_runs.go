@@ -32,6 +32,7 @@ type codexSessionRuntimeState struct {
 	DeployConfirmPending bool   `json:"deploy_confirm_pending,omitempty"`
 	PendingPlanID        string `json:"pending_plan_id,omitempty"`
 	PendingPlanHash      string `json:"pending_plan_hash,omitempty"`
+	PendingPlanText      string `json:"pending_plan_text,omitempty"`
 	ActiveRunID          string `json:"active_run_id,omitempty"`
 	LastRunID            string `json:"last_run_id,omitempty"`
 }
@@ -832,6 +833,7 @@ func applySessionRuntimeLocked(rec *codexSessionRecord, runtime codexSessionRunt
 	rec.DeployConfirmPending = runtime.DeployConfirmPending
 	rec.PendingPlanID = strings.TrimSpace(runtime.PendingPlanID)
 	rec.PendingPlanHash = strings.TrimSpace(runtime.PendingPlanHash)
+	rec.PendingPlanText = strings.TrimSpace(runtime.PendingPlanText)
 	rec.ActiveRunID = strings.TrimSpace(runtime.ActiveRunID)
 	rec.LastRunID = strings.TrimSpace(runtime.LastRunID)
 }
@@ -848,6 +850,7 @@ func sessionRuntimeFromRecord(rec *codexSessionRecord) codexSessionRuntimeState 
 		DeployConfirmPending: rec.DeployConfirmPending,
 		PendingPlanID:        strings.TrimSpace(rec.PendingPlanID),
 		PendingPlanHash:      strings.TrimSpace(rec.PendingPlanHash),
+		PendingPlanText:      strings.TrimSpace(rec.PendingPlanText),
 		ActiveRunID:          strings.TrimSpace(rec.ActiveRunID),
 		LastRunID:            strings.TrimSpace(rec.LastRunID),
 	}

@@ -35,6 +35,7 @@ type codexSessionRecord struct {
 	DeployConfirmPending bool      `json:"deploy_confirm_pending,omitempty"`
 	PendingPlanID        string    `json:"pending_plan_id,omitempty"`
 	PendingPlanHash      string    `json:"pending_plan_hash,omitempty"`
+	PendingPlanText      string    `json:"pending_plan_text,omitempty"`
 	ActiveRunID          string    `json:"active_run_id,omitempty"`
 	LastRunID            string    `json:"last_run_id,omitempty"`
 	CreatedAt            time.Time `json:"created_at"`

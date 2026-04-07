@@ -121,6 +121,17 @@ const (
 	codexApprovalReadyMarker   = "[CODEX_APPROVAL_READY]"
 )
 
+var codexPlanningAllowedToolNames = map[string]struct{}{
+	"read_file":       {},
+	"read_file_lines": {},
+	"list_dir":        {},
+	"web_search":      {},
+	"web_fetch":       {},
+	"github":          {},
+	"git":             {},
+	"load_image":      {},
+}
+
 func NewAgentLoop(
 	cfg *config.Config,
 	msgBus *bus.MessageBus,
@@ -1465,8 +1476,6 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 				return "", err
 			}
 			return response, nil
-		} else if strings.TrimSpace(msg.Content) != "" {
-			al.clearCodexApprovalPending(opts.SessionKey)
 		}
 	}
 
@@ -1823,6 +1832,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState) (turnResult, er
 	maxMediaSize := cfg.Agents.Defaults.GetMaxMediaSize()
 	messages = resolveMediaRefs(messages, al.mediaStore, maxMediaSize)
 	workMode := al.getSessionWorkMode(ts.sessionKey)
+	codexApprovalPending := isCodexPlanningMode(workMode) && al.hasCodexApprovalPending(ts.sessionKey)
 	var activeCodex *commands.CodexSessionInfo
 	var codexRepoTargets []string
 	if workMode != "" {
@@ -1834,7 +1844,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState) (turnResult, er
 				codexRepoTargets = repos
 			}
 		}
-		messages = injectWorkModePrompt(messages, workMode, ts.agent.Workspace, activeCodex, codexRepoTargets)
+		messages = injectWorkModePrompt(messages, workMode, ts.agent.Workspace, activeCodex, codexRepoTargets, codexApprovalPending)
 	}
 
 	if !ts.opts.NoHistory {
@@ -1870,7 +1880,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState) (turnResult, er
 			)
 			messages = resolveMediaRefs(messages, al.mediaStore, maxMediaSize)
 			if workMode != "" {
-				messages = injectWorkModePrompt(messages, workMode, ts.agent.Workspace, activeCodex, codexRepoTargets)
+				messages = injectWorkModePrompt(messages, workMode, ts.agent.Workspace, activeCodex, codexRepoTargets, codexApprovalPending)
 			}
 		}
 	}
@@ -2015,8 +2025,7 @@ turnLoop:
 		gracefulTerminal, _ := ts.gracefulInterruptRequested()
 		providerToolDefs := ts.agent.Tools.ToProviderDefs()
 		if isCodexPlanningMode(workMode) {
-			// Planning mode is intentionally conversation-only.
-			providerToolDefs = nil
+			providerToolDefs = filterCodexPlanningTools(providerToolDefs)
 		}
 
 		// Native web search support (from HEAD)
@@ -2667,6 +2676,7 @@ turnLoop:
 				ts.opts.MessageID,
 				ts.opts.ReplyToMessageID,
 			)
+			execCtx = tools.WithToolWorkMode(execCtx, workMode)
 			toolResult := ts.agent.Tools.ExecuteWithContext(
 				execCtx,
 				toolName,
@@ -2984,9 +2994,17 @@ turnLoop:
 		}
 	}
 	if isCodexPlanningMode(workMode) {
-		var approvalPending bool
-		finalContent, approvalPending = normalizeCodexPlanningReply(finalContent)
-		al.setCodexApprovalState(ts.sessionKey, approvalPending, finalContent)
+		hadApprovalPending := al.hasCodexApprovalPending(ts.sessionKey)
+		var approvalPending, preservePending bool
+		finalContent, approvalPending, preservePending = normalizeCodexPlanningReplyWithState(finalContent, hadApprovalPending)
+		switch {
+		case approvalPending:
+			al.setCodexApprovalState(ts.sessionKey, true, finalContent)
+		case preservePending:
+			// Keep the existing approved plan armed while answering follow-up questions.
+		default:
+			al.clearCodexApprovalPending(ts.sessionKey)
+		}
 	} else {
 		al.clearCodexApprovalPending(ts.sessionKey)
 	}
@@ -3065,6 +3083,7 @@ func workModePrompt(
 	workMode, workspace string,
 	activeCodex *commands.CodexSessionInfo,
 	repoTargets []string,
+	approvalPending bool,
 ) string {
 	switch normalizeCodexWorkMode(workMode) {
 	case "code":
@@ -3105,11 +3124,24 @@ Prioritize implementation over discussion when the request is actionable.
 			}
 			extra += "\nGitHub repos available: " + strings.Join(repoTargets[:limit], ", ")
 		}
+		pendingExtra := ""
+		if approvalPending {
+			pendingExtra = `
+
+Pending-plan behavior:
+- A codex plan is already pending approval.
+- Treat the next user messages as follow-up discussion about that existing plan.
+- Answer follow-up questions directly instead of restating the full plan.
+- Do not ask for approval again unless the plan materially changes.
+- If the plan materially changes, restate the updated plan and end with the exact approval marker.`
+		}
 		return strings.TrimSpace(fmt.Sprintf(`## Codex Planning Mode
 You are in codex planning mode. Treat this as conversational pre-planning for a repository session.
 
-Planning-only behavior (strict):
-- Do not execute tools, shell commands, git operations, or file edits in this mode.
+Planning-only behavior:
+- You may use read-only inspection tools in this mode to understand the repo or environment.
+- Allowed inspection includes reading files, listing directories, safe git inspection, GitHub inspection, and web lookups.
+- Do not make any repo changes, file edits, commits, pushes, deploys, restarts, or other mutating actions in this mode.
 - Ask clarifying questions, identify risks, and refine scope until the user approves execution.
 - Produce structured plans with concrete steps, validation checks, and rollback notes.
 - Keep all proposed paths within the repo workspace; avoid absolute system paths.
@@ -3119,7 +3151,7 @@ Execution handoff:
 - After you output the approval marker, the user can reply with a machine-checked approval phrase such as "proceed".
 - After that, switch to implementation with test/build/deploy evidence.
 
-Active repo path: %s%s`, codexApprovalReadyMarker, repoPath, extra))
+Active repo path: %s%s%s`, codexApprovalReadyMarker, repoPath, extra, pendingExtra))
 	case "ops":
 		return strings.TrimSpace(fmt.Sprintf(`## Ops Mode
 You are in ops mode. The user wants the PicoClaw instance itself adjusted.
@@ -3198,6 +3230,11 @@ func codexApprovalReady(content string) bool {
 }
 
 func normalizeCodexPlanningReply(content string) (string, bool) {
+	normalized, armed, _ := normalizeCodexPlanningReplyWithState(content, false)
+	return normalized, armed
+}
+
+func normalizeCodexPlanningReplyWithState(content string, approvalPending bool) (string, bool, bool) {
 	armed := codexApprovalReady(content)
 	if !armed {
 		armed = codexPlanningImplicitApprovalReady(content)
@@ -3205,13 +3242,13 @@ func normalizeCodexPlanningReply(content string) (string, bool) {
 	content = strings.ReplaceAll(content, codexApprovalReadyMarker, "")
 	content = strings.TrimSpace(content)
 	if !armed {
-		return content, false
+		return content, false, approvalPending && content != ""
 	}
 	if content == "" {
 		content = "Plan is ready."
 	}
 	content += "\n\nReply `proceed` to execute this plan."
-	return content, true
+	return content, true, false
 }
 
 func codexPlanningImplicitApprovalReady(content string) bool {
@@ -3249,8 +3286,9 @@ func injectWorkModePrompt(
 	workMode, workspace string,
 	activeCodex *commands.CodexSessionInfo,
 	repoTargets []string,
+	approvalPending bool,
 ) []providers.Message {
-	instruction := workModePrompt(workMode, workspace, activeCodex, repoTargets)
+	instruction := workModePrompt(workMode, workspace, activeCodex, repoTargets, approvalPending)
 	if instruction == "" || len(messages) == 0 {
 		return messages
 	}
@@ -4088,6 +4126,7 @@ func (al *AgentLoop) setSessionWorkMode(sessionKey, workMode string) {
 				runtime.ApprovalPending = false
 				runtime.PendingPlanID = ""
 				runtime.PendingPlanHash = ""
+				runtime.PendingPlanText = ""
 			})
 		}
 		return
@@ -4105,6 +4144,7 @@ func (al *AgentLoop) setSessionWorkMode(sessionKey, workMode string) {
 				runtime.ApprovalPending = false
 				runtime.PendingPlanID = ""
 				runtime.PendingPlanHash = ""
+				runtime.PendingPlanText = ""
 			})
 		}
 	}
@@ -4149,6 +4189,7 @@ func (al *AgentLoop) clearSessionWorkMode(sessionKey string) {
 			runtime.ApprovalPending = false
 			runtime.PendingPlanID = ""
 			runtime.PendingPlanHash = ""
+			runtime.PendingPlanText = ""
 		})
 	}
 }
@@ -4165,6 +4206,7 @@ func (al *AgentLoop) setCodexApprovalPending(sessionKey string, pending bool) {
 				runtime.ApprovalPending = false
 				runtime.PendingPlanID = ""
 				runtime.PendingPlanHash = ""
+				runtime.PendingPlanText = ""
 			})
 		}
 		return
@@ -4194,6 +4236,7 @@ func (al *AgentLoop) setCodexApprovalState(sessionKey string, pending bool, plan
 			runtime.ApprovalPending = true
 			runtime.PendingPlanID = planID
 			runtime.PendingPlanHash = planHash
+			runtime.PendingPlanText = planText
 		})
 	}
 }
@@ -4208,8 +4251,17 @@ func (al *AgentLoop) currentApprovedCodexPlan(sessionKey string, history []provi
 		return "", "", "", fmt.Errorf("No codex plan is awaiting approval yet. Keep chatting in /codex until I ask you to reply `proceed`.")
 	}
 
-	planText := latestAssistantMessage(history)
+	planText := strings.TrimSpace(runtime.PendingPlanText)
+	if planText == "" {
+		planText = findApprovedCodexPlanInHistory(history, runtime.PendingPlanHash)
+	}
 	if strings.TrimSpace(planText) == "" {
+		latestPlan := latestAssistantMessage(history)
+		if strings.TrimSpace(latestPlan) != "" {
+			if _, latestHash := codexPlanIdentity(latestPlan); latestHash != "" && strings.TrimSpace(runtime.PendingPlanHash) != "" && !strings.EqualFold(strings.TrimSpace(runtime.PendingPlanHash), latestHash) {
+				return "", "", "", fmt.Errorf("The pending codex plan no longer matches the latest planner reply. Review the latest plan and reply `proceed` again.")
+			}
+		}
 		return "", "", "", fmt.Errorf("The pending codex plan could not be verified. Ask me to restate the plan, then reply `proceed` again.")
 	}
 
@@ -4250,6 +4302,7 @@ func (al *AgentLoop) clearCodexApprovalPending(sessionKey string) {
 			runtime.ApprovalPending = false
 			runtime.PendingPlanID = ""
 			runtime.PendingPlanHash = ""
+			runtime.PendingPlanText = ""
 		})
 	}
 }
@@ -4414,6 +4467,20 @@ func filterClientWebSearch(tools []providers.ToolDefinition) []providers.ToolDef
 		result = append(result, t)
 	}
 	return result
+}
+
+func filterCodexPlanningTools(defs []providers.ToolDefinition) []providers.ToolDefinition {
+	if len(defs) == 0 {
+		return nil
+	}
+	filtered := make([]providers.ToolDefinition, 0, len(defs))
+	for _, td := range defs {
+		name := strings.TrimSpace(td.Function.Name)
+		if _, ok := codexPlanningAllowedToolNames[name]; ok {
+			filtered = append(filtered, td)
+		}
+	}
+	return filtered
 }
 
 // Helper to extract provider from registry for cleanup
