@@ -77,6 +77,17 @@ func resolveCodexCLIModelArg(cfg *config.Config, modelName string) string {
 	return modelName
 }
 
+func (al *AgentLoop) resolveCodexExecutorModel(runtime codexSessionRuntimeState) string {
+	executorModel := strings.TrimSpace(runtime.ExecutorModel)
+	if strings.EqualFold(executorModel, "deploy-script") {
+		executorModel = ""
+	}
+	if executorModel == "" {
+		executorModel = strings.TrimSpace(al.findCodexModelName(al.GetConfig()))
+	}
+	return executorModel
+}
+
 func (al *AgentLoop) codexPlannerStatusRuntimeInfo(sessionKey string) (*commands.CodexPlannerStatusInfo, bool) {
 	if al == nil || al.codexStore == nil {
 		return nil, false
@@ -232,10 +243,7 @@ func (al *AgentLoop) startApprovedCodexRun(
 		plannerModel = strings.TrimSpace(al.findCodexPlannerModelName(al.GetConfig()))
 	}
 
-	executorModel := strings.TrimSpace(runtime.ExecutorModel)
-	if executorModel == "" {
-		executorModel = strings.TrimSpace(al.findCodexModelName(al.GetConfig()))
-	}
+	executorModel := al.resolveCodexExecutorModel(runtime)
 	if executorModel == "" {
 		return "", fmt.Errorf("no codex-cli model configured in model_list")
 	}

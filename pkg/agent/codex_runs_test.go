@@ -127,6 +127,56 @@ func TestCodexSessionStore_RunLifecycleAndPersistence(t *testing.T) {
 	}
 }
 
+func TestCodexSessionStore_CreateRun_DeployDoesNotPoisonSessionExecutor(t *testing.T) {
+	workspace := t.TempDir()
+	store := newCodexSessionStore(workspace)
+	if store == nil {
+		t.Fatal("expected codex session store")
+	}
+
+	scopeKey := "agent:test:main"
+	slug := "picoclaw-demo"
+	repoPath, err := store.repoPathForSlug(slug)
+	if err != nil {
+		t.Fatalf("repoPathForSlug() error = %v", err)
+	}
+	if err := initGitRepo(t, repoPath); err != nil {
+		t.Fatalf("initGitRepo() error = %v", err)
+	}
+
+	if _, err := store.CreateOrActivate(scopeKey, slug, ""); err != nil {
+		t.Fatalf("CreateOrActivate() error = %v", err)
+	}
+	if err := store.SetSessionRuntime(scopeKey, codexSessionRuntimeState{
+		PlannerModel:  "gpt-5.4-mini",
+		ExecutorModel: "codex-cli-local",
+		WorkMode:      "codex-plan",
+	}); err != nil {
+		t.Fatalf("SetSessionRuntime() error = %v", err)
+	}
+
+	run, err := store.CreateRun(scopeKey, codexRunCreateOptions{
+		PlannerModel:  "gpt-5.4-mini",
+		ExecutorModel: "deploy-script",
+		Mode:          "deploy",
+		InitiatedBy:   "deploy-approval",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun() error = %v", err)
+	}
+	if run.ExecutorModel != "deploy-script" {
+		t.Fatalf("run executor=%q, want deploy-script", run.ExecutorModel)
+	}
+
+	runtime, ok := store.SessionRuntime(scopeKey)
+	if !ok {
+		t.Fatal("SessionRuntime() not found")
+	}
+	if runtime.ExecutorModel != "codex-cli-local" {
+		t.Fatalf("runtime executor=%q, want preserved codex-cli-local", runtime.ExecutorModel)
+	}
+}
+
 func TestCodexSessionStore_CreateOrActivate_AllowsEquivalentGitHubRemotes(t *testing.T) {
 	workspace := t.TempDir()
 	store := newCodexSessionStore(workspace)
