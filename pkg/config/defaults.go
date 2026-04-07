@@ -29,35 +29,8 @@ func DefaultConfig() *Config {
 				MaxToolIterations:         50,
 				SummarizeMessageThreshold: 20,
 				SummarizeTokenPercent:     75,
-				Routing: &RoutingConfig{
-					Enabled:  true,
-					PaidTier: "heavy",
-					Tiers: []RoutingTierConfig{
-						{
-							Name:     "fast",
-							MaxScore: 0.20,
-							Model: &AgentModelConfig{
-								Primary:   "gpt-5.4-mini",
-								Fallbacks: []string{},
-							},
-						},
-						{
-							Name: "tools",
-							Model: &AgentModelConfig{
-								Primary:   "gpt-5.4-mini",
-								Fallbacks: []string{},
-							},
-						},
-						{
-							Name: "heavy",
-							Model: &AgentModelConfig{
-								Primary:   "gpt-5.4",
-								Fallbacks: []string{},
-							},
-						},
-					},
-				},
-				SteeringMode: "one-at-a-time",
+				Routing:                   nil,
+				SteeringMode:              "one-at-a-time",
 				ToolFeedback: ToolFeedbackConfig{
 					Enabled:       false,
 					MaxArgsLength: 300,
@@ -210,12 +183,6 @@ func DefaultConfig() *Config {
 			{
 				ModelName:  "gpt-5.4-mini",
 				Model:      "openai/gpt-5.4-mini",
-				APIBase:    "https://api.openai.com/v1",
-				AuthMethod: "oauth",
-			},
-			{
-				ModelName:  "gpt-5.4-nano",
-				Model:      "openai/gpt-5.4-nano",
 				APIBase:    "https://api.openai.com/v1",
 				AuthMethod: "oauth",
 			},

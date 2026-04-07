@@ -294,7 +294,7 @@ func TestDefaultConfig_MaxToolIterations(t *testing.T) {
 	}
 }
 
-func TestDefaultConfig_TieredRoutingHydrated(t *testing.T) {
+func TestDefaultConfig_UsesDirectModelsByDefault(t *testing.T) {
 	cfg := DefaultConfig()
 
 	if cfg.Agents.Defaults.ModelName != "gpt-5.4-mini" {
@@ -304,75 +304,18 @@ func TestDefaultConfig_TieredRoutingHydrated(t *testing.T) {
 		t.Fatalf("DefaultConfig().Agents.Defaults.ModelFallbacks = %v, want []", got)
 	}
 
-	rt := cfg.Agents.Defaults.Routing
-	if rt == nil {
-		t.Fatal("DefaultConfig().Agents.Defaults.Routing should be configured")
-	}
-	if !rt.Enabled {
-		t.Fatal("DefaultConfig().Agents.Defaults.Routing.Enabled should be true")
-	}
-	if rt.PaidTier != "heavy" {
-		t.Fatalf("DefaultConfig().Agents.Defaults.Routing.PaidTier = %q, want %q", rt.PaidTier, "heavy")
-	}
-
-	expected := map[string]struct {
-		maxScore  float64
-		primary   string
-		fallbacks []string
-	}{
-		"fast": {
-			maxScore:  0.20,
-			primary:   "gpt-5.4-mini",
-			fallbacks: []string{},
-		},
-		"tools": {
-			maxScore:  0,
-			primary:   "gpt-5.4-mini",
-			fallbacks: []string{},
-		},
-		"heavy": {
-			maxScore:  0,
-			primary:   "gpt-5.4",
-			fallbacks: []string{},
-		},
-	}
-
-	if len(rt.Tiers) != len(expected) {
-		t.Fatalf("DefaultConfig().Agents.Defaults.Routing.Tiers len = %d, want %d", len(rt.Tiers), len(expected))
-	}
-
-	for _, tier := range rt.Tiers {
-		want, ok := expected[tier.Name]
-		if !ok {
-			t.Fatalf("unexpected routing tier %q in defaults", tier.Name)
-		}
-		if tier.MaxScore != want.maxScore {
-			t.Fatalf("tier %q max_score = %v, want %v", tier.Name, tier.MaxScore, want.maxScore)
-		}
-		if tier.Model == nil {
-			t.Fatalf("tier %q model should not be nil", tier.Name)
-		}
-		if tier.Model.Primary != want.primary {
-			t.Fatalf("tier %q primary = %q, want %q", tier.Name, tier.Model.Primary, want.primary)
-		}
-		if strings.Join(tier.Model.Fallbacks, ",") != strings.Join(want.fallbacks, ",") {
-			t.Fatalf("tier %q fallbacks = %v, want %v", tier.Name, tier.Model.Fallbacks, want.fallbacks)
-		}
-	}
-
-	if err := cfg.ValidateRouting(); err != nil {
-		t.Fatalf("DefaultConfig().ValidateRouting() error = %v", err)
+	if cfg.Agents.Defaults.Routing != nil {
+		t.Fatalf("DefaultConfig().Agents.Defaults.Routing = %+v, want nil", cfg.Agents.Defaults.Routing)
 	}
 }
 
-func TestDefaultConfig_TieredModelAliasesPresent(t *testing.T) {
+func TestDefaultConfig_ModelAliasesPresent(t *testing.T) {
 	cfg := DefaultConfig()
 
 	expectedModels := map[string]string{
 		"codex-cli-local": "codex-cli/codex",
 		"gpt-5.4-mini":    "openai/gpt-5.4-mini",
 		"gpt-5.4":         "openai/gpt-5.4",
-		"gpt-5.4-nano":    "openai/gpt-5.4-nano",
 	}
 
 	modelsByName := make(map[string]*ModelConfig, len(cfg.ModelList))

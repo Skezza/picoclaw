@@ -11,17 +11,17 @@ import (
 func boostCommand() Definition {
 	return Definition{
 		Name:        "boost",
-		Description: "Use the heavy routed model for your next message",
+		Description: "Use the stronger model for your next message",
 		Usage:       "/boost",
 		Handler: func(_ context.Context, req Request, rt *Runtime) error {
 			targets := sessionModeTargets(rt)
-			if targets.Heavy.Target == "" {
-				return req.Reply("Boost unavailable: heavy routing tier is not configured.")
+			if targets.Boost.Target == "" {
+				return req.Reply("Boost unavailable: no stronger model is configured.")
 			}
 			if rt == nil || rt.ArmNextModelMode == nil {
 				return req.Reply(unavailableMsg)
 			}
-			if err := rt.ArmNextModelMode(targets.Heavy.Target); err != nil {
+			if err := rt.ArmNextModelMode(targets.Boost.Target); err != nil {
 				return req.Reply(err.Error())
 			}
 			if rt.ClearSessionWorkMode != nil {
@@ -29,33 +29,7 @@ func boostCommand() Definition {
 					return req.Reply(err.Error())
 				}
 			}
-			return req.Reply(fmt.Sprintf("Boost armed. Next message will use %s.", targets.Heavy.Label))
-		},
-	}
-}
-
-func paidCommand() Definition {
-	return Definition{
-		Name:        "paid",
-		Description: "Legacy alias for the heavy routed model",
-		Usage:       "/paid",
-		Handler: func(_ context.Context, req Request, rt *Runtime) error {
-			targets := sessionModeTargets(rt)
-			if targets.Heavy.Target == "" {
-				return req.Reply("Paid mode unavailable: heavy routing tier is not configured.")
-			}
-			if rt == nil || rt.SetSessionModelMode == nil {
-				return req.Reply(unavailableMsg)
-			}
-			if err := rt.SetSessionModelMode(targets.Heavy.Target); err != nil {
-				return req.Reply(err.Error())
-			}
-			if rt.ClearSessionWorkMode != nil {
-				if err := rt.ClearSessionWorkMode(); err != nil {
-					return req.Reply(err.Error())
-				}
-			}
-			return req.Reply(fmt.Sprintf("Legacy paid mode set to heavy (%s).", targets.Heavy.Label))
+			return req.Reply(fmt.Sprintf("Boost armed. Next message will use %s.", targets.Boost.Label))
 		},
 	}
 }
@@ -63,45 +37,23 @@ func paidCommand() Definition {
 func codeCommand() Definition {
 	return Definition{
 		Name:        "code",
-		Description: "Use the tools routing tier for this session",
+		Description: "Use the coding-friendly default model for this session",
 		Usage:       "/code",
 		Handler: func(_ context.Context, req Request, rt *Runtime) error {
 			targets := sessionModeTargets(rt)
-			if targets.Tools.Target == "" {
-				return req.Reply("Code mode unavailable: tools tier is not configured.")
+			if targets.Code.Target == "" {
+				return req.Reply("Code mode unavailable: no default model is configured.")
 			}
 			if rt == nil || rt.SetSessionModelMode == nil || rt.SetSessionWorkMode == nil {
 				return req.Reply(unavailableMsg)
 			}
-			if err := rt.SetSessionModelMode(targets.Tools.Target); err != nil {
+			if err := rt.SetSessionModelMode(targets.Code.Target); err != nil {
 				return req.Reply(err.Error())
 			}
 			if err := rt.SetSessionWorkMode("code"); err != nil {
 				return req.Reply(err.Error())
 			}
-			return req.Reply(fmt.Sprintf("Session mode set to code (%s).", targets.Tools.Label))
-		},
-	}
-}
-
-func routeCommand() Definition {
-	return Definition{
-		Name:        "route",
-		Description: "Use automatic tier routing for this session",
-		Usage:       "/route",
-		Handler: func(_ context.Context, req Request, rt *Runtime) error {
-			if rt == nil || rt.ClearSessionModelMode == nil {
-				return req.Reply(unavailableMsg)
-			}
-			if err := rt.ClearSessionModelMode(); err != nil {
-				return req.Reply(err.Error())
-			}
-			if rt.ClearSessionWorkMode != nil {
-				if err := rt.ClearSessionWorkMode(); err != nil {
-					return req.Reply(err.Error())
-				}
-			}
-			return req.Reply("Session mode set to route.")
+			return req.Reply(fmt.Sprintf("Session mode set to code (%s).", targets.Code.Label))
 		},
 	}
 }
@@ -109,7 +61,7 @@ func routeCommand() Definition {
 func defaultCommand() Definition {
 	return Definition{
 		Name:        "default",
-		Description: "Return this session to default routing",
+		Description: "Return this session to the default model",
 		Usage:       "/default",
 		Handler: func(_ context.Context, req Request, rt *Runtime) error {
 			if rt == nil || rt.ClearSessionModelMode == nil {
@@ -123,7 +75,7 @@ func defaultCommand() Definition {
 					return req.Reply(err.Error())
 				}
 			}
-			return req.Reply("Session mode set to route.")
+			return req.Reply("Session mode set to default.")
 		},
 	}
 }
@@ -153,7 +105,7 @@ func statusCommand() Definition {
 				persistent, pending = rt.GetSessionModelMode()
 			}
 
-			lines := make([]string, 0, 5)
+			lines := make([]string, 0, 6)
 			if currentModel != "" {
 				if provider != "" {
 					lines = append(lines, fmt.Sprintf("Current Model: %s (Provider: %s)", currentModel, provider))
@@ -162,9 +114,6 @@ func statusCommand() Definition {
 				}
 			}
 			lines = append(lines, fmt.Sprintf("Session Mode: %s", sessionModeDescription(persistent, pending, workMode, targets)))
-			if workMode != "" {
-				lines = append(lines, fmt.Sprintf("Work Mode: %s", workMode))
-			}
 			if rt.CodexActive != nil {
 				if codex, ok := rt.CodexActive(); ok && codex != nil {
 					lines = append(lines, fmt.Sprintf("Codex Session: %s (%s)", codex.Slug, codex.ID))
@@ -176,14 +125,9 @@ func statusCommand() Definition {
 			} else {
 				lines = append(lines, "Pending Boost: none")
 			}
-			if targets.Fast.Label != "" {
-				lines = append(lines, fmt.Sprintf("Fast Model: %s", targets.Fast.Label))
-			}
-			if targets.Heavy.Label != "" {
-				lines = append(lines, fmt.Sprintf("Heavy Model: %s", targets.Heavy.Label))
-			}
-			if targets.Tools.Label != "" {
-				lines = append(lines, fmt.Sprintf("Tools Model: %s", targets.Tools.Label))
+			lines = append(lines, fmt.Sprintf("Default Model: %s", targets.Code.Label))
+			if targets.Boost.Target != "" && targets.Boost.Label != targets.Code.Label {
+				lines = append(lines, fmt.Sprintf("Boost Model: %s", targets.Boost.Label))
 			}
 			return req.Reply(strings.Join(lines, "\n"))
 		},
@@ -191,98 +135,70 @@ func statusCommand() Definition {
 }
 
 type sessionModeTarget struct {
-	Name   string
 	Target string
 	Label  string
 }
 
 type sessionTargets struct {
-	Fast  sessionModeTarget
-	Heavy sessionModeTarget
-	Tools sessionModeTarget
+	Code  sessionModeTarget
+	Boost sessionModeTarget
 }
 
 func sessionModeTargets(rt *Runtime) sessionTargets {
-	if rt == nil || rt.Config == nil {
-		return sessionTargets{}
-	}
-
 	targets := sessionTargets{
-		Heavy: sessionModeTarget{
-			Name:   "heavy",
-			Target: strings.TrimSpace(rt.Config.Agents.Defaults.ModelName),
-			Label:  strings.TrimSpace(rt.Config.Agents.Defaults.ModelName),
+		Code: sessionModeTarget{
+			Target: "gpt-5.4-mini",
+			Label:  "gpt-5.4-mini",
+		},
+		Boost: sessionModeTarget{
+			Target: "gpt-5.4",
+			Label:  "gpt-5.4",
 		},
 	}
+	if rt == nil || rt.Config == nil {
+		return targets
+	}
 
-	if rc := rt.Config.Agents.Defaults.Routing; rc != nil {
-		if tierName, tierLabel := preferredRoutingTier(rc, "fast"); tierName != "" && tierLabel != "" {
-			targets.Fast = sessionModeTarget{Name: "fast", Target: "tier:" + tierName, Label: tierLabel}
-		}
-		if tierName, tierLabel := preferredRoutingTier(rc, "heavy", "paid"); tierName != "" && tierLabel != "" {
-			targets.Heavy = sessionModeTarget{Name: "heavy", Target: "tier:" + tierName, Label: tierLabel}
-		}
-		if tierName, tierLabel := preferredRoutingTier(rc, "tools"); tierName != "" && tierLabel != "" {
-			targets.Tools = sessionModeTarget{Name: "tools", Target: "tier:" + tierName, Label: tierLabel}
-		} else {
-			targets.Tools = targets.Heavy
-			targets.Tools.Name = "tools"
-		}
+	defaultModel := strings.TrimSpace(rt.Config.Agents.Defaults.ModelName)
+	if defaultModel != "" {
+		targets.Code = sessionModeTarget{Target: defaultModel, Label: defaultModel}
+	}
+	if hasModelConfig(rt.Config, "gpt-5.4") {
+		targets.Boost = sessionModeTarget{Target: "gpt-5.4", Label: "gpt-5.4"}
+	} else {
+		targets.Boost = targets.Code
 	}
 	return targets
 }
 
-func preferredRoutingTier(rc *config.RoutingConfig, modes ...string) (name, label string) {
-	if rc == nil {
-		return "", ""
+func hasModelConfig(cfg *config.Config, modelName string) bool {
+	if cfg == nil {
+		return false
 	}
-
-	for _, mode := range modes {
-		target := ""
-		switch strings.ToLower(strings.TrimSpace(mode)) {
-		case "paid":
-			target = strings.TrimSpace(rc.PaidTier)
-			if target == "" {
-				target = "paid"
-			}
-		case "fast", "heavy", "tools":
-			target = strings.TrimSpace(mode)
-		default:
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" {
+		return false
+	}
+	for _, mc := range cfg.ModelList {
+		if mc == nil {
 			continue
 		}
-
-		for _, tier := range rc.Tiers {
-			if !strings.EqualFold(strings.TrimSpace(tier.Name), target) || tier.Model == nil {
-				continue
-			}
-			primary := strings.TrimSpace(tier.Model.Primary)
-			if primary == "" {
-				return "", ""
-			}
-			return strings.TrimSpace(tier.Name), primary
+		if strings.EqualFold(strings.TrimSpace(mc.ModelName), modelName) {
+			return true
 		}
 	}
-	return "", ""
+	return false
 }
 
 func sessionModeDescription(persistent, pending, workMode string, targets sessionTargets) string {
 	if pending != "" {
 		return fmt.Sprintf("boost armed for next message (%s)", sessionModeLabel(pending, targets))
 	}
-	if workMode != "" {
-		if persistent != "" {
-			return fmt.Sprintf("%s (%s)", workMode, sessionModeLabel(persistent, targets))
-		}
-		return workMode
+	if workMode == "code" {
+		return fmt.Sprintf("code (%s)", sessionModeLabel(persistent, targets))
 	}
 	if persistent == "" {
-		return "route (default)"
-	}
-	if targets.Heavy.Target != "" && strings.EqualFold(persistent, targets.Heavy.Target) {
-		return fmt.Sprintf("heavy (%s)", targets.Heavy.Label)
-	}
-	if targets.Tools.Target != "" && strings.EqualFold(persistent, targets.Tools.Target) {
-		return fmt.Sprintf("tools (%s)", targets.Tools.Label)
+		return "default"
 	}
 	return fmt.Sprintf("custom (%s)", sessionModeLabel(persistent, targets))
 }
@@ -290,12 +206,10 @@ func sessionModeDescription(persistent, pending, workMode string, targets sessio
 func sessionModeLabel(value string, targets sessionTargets) string {
 	value = strings.TrimSpace(value)
 	switch {
-	case targets.Heavy.Target != "" && strings.EqualFold(value, targets.Heavy.Target):
-		return targets.Heavy.Label
-	case targets.Tools.Target != "" && strings.EqualFold(value, targets.Tools.Target):
-		return targets.Tools.Label
-	case targets.Fast.Target != "" && strings.EqualFold(value, targets.Fast.Target):
-		return targets.Fast.Label
+	case targets.Boost.Target != "" && strings.EqualFold(value, targets.Boost.Target):
+		return targets.Boost.Label
+	case targets.Code.Target != "" && strings.EqualFold(value, targets.Code.Target):
+		return targets.Code.Label
 	default:
 		return value
 	}
