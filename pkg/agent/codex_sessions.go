@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -223,7 +224,7 @@ func (s *codexSessionStore) CreateOrActivate(scopeKey, slug, source string) (*co
 			UpdatedAt: now,
 		}
 		s.state.Sessions[rec.ID] = rec
-	} else if repoURL != "" && rec.RepoURL != "" && !strings.EqualFold(rec.RepoURL, repoURL) {
+	} else if repoURL != "" && rec.RepoURL != "" && !repoSourcesEquivalent(rec.RepoURL, repoURL) {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("repo source does not match existing session remote")
 	}
@@ -241,7 +242,7 @@ func (s *codexSessionStore) CreateOrActivate(scopeKey, slug, source string) (*co
 	if !ok || current == nil {
 		return nil, fmt.Errorf("codex session state changed while preparing repo")
 	}
-	if current.RepoURL == "" && repoURL != "" {
+	if repoURL != "" && (current.RepoURL == "" || repoSourcesEquivalent(current.RepoURL, repoURL)) {
 		current.RepoURL = sanitizeRepoRemote(repoURL)
 	}
 	current.UpdatedAt = time.Now().UTC()
@@ -514,6 +515,52 @@ func normalizeRepoSource(source string) (string, error) {
 	}
 
 	return "", fmt.Errorf("repo source must be https://, ssh://, git@, or owner/repo")
+}
+
+func repoSourcesEquivalent(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return a == b
+	}
+	if strings.EqualFold(a, b) {
+		return true
+	}
+	ak, aok := canonicalGitHubRepoKey(a)
+	bk, bok := canonicalGitHubRepoKey(b)
+	return aok && bok && ak == bk
+}
+
+func canonicalGitHubRepoKey(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", false
+	}
+	if strings.HasPrefix(raw, "git@github.com:") {
+		repo := strings.TrimPrefix(raw, "git@github.com:")
+		repo = strings.TrimSuffix(repo, ".git")
+		repo = strings.Trim(repo, "/")
+		if repo == "" {
+			return "", false
+		}
+		return strings.ToLower(repo), true
+	}
+	if strings.HasPrefix(raw, "ssh://") || strings.HasPrefix(raw, "https://") {
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			return "", false
+		}
+		if !strings.EqualFold(parsed.Hostname(), "github.com") {
+			return "", false
+		}
+		repo := strings.Trim(parsed.Path, "/")
+		repo = strings.TrimSuffix(repo, ".git")
+		if repo == "" {
+			return "", false
+		}
+		return strings.ToLower(repo), true
+	}
+	return "", false
 }
 
 func newCodexSessionID() string {
