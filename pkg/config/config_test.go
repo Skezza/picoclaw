@@ -297,8 +297,8 @@ func TestDefaultConfig_MaxToolIterations(t *testing.T) {
 func TestDefaultConfig_TieredRoutingHydrated(t *testing.T) {
 	cfg := DefaultConfig()
 
-	if cfg.Agents.Defaults.ModelName != "codex-cli-local" {
-		t.Fatalf("DefaultConfig().Agents.Defaults.ModelName = %q, want %q", cfg.Agents.Defaults.ModelName, "codex-cli-local")
+	if cfg.Agents.Defaults.ModelName != "gpt-5.4-mini" {
+		t.Fatalf("DefaultConfig().Agents.Defaults.ModelName = %q, want %q", cfg.Agents.Defaults.ModelName, "gpt-5.4-mini")
 	}
 	if got := cfg.Agents.Defaults.ModelFallbacks; len(got) != 0 {
 		t.Fatalf("DefaultConfig().Agents.Defaults.ModelFallbacks = %v, want []", got)
@@ -322,17 +322,17 @@ func TestDefaultConfig_TieredRoutingHydrated(t *testing.T) {
 	}{
 		"fast": {
 			maxScore:  0.20,
-			primary:   "codex-cli-local",
+			primary:   "gpt-5.4-nano",
 			fallbacks: []string{},
 		},
 		"tools": {
 			maxScore:  0,
-			primary:   "codex-cli-local",
+			primary:   "gpt-5.4-mini",
 			fallbacks: []string{},
 		},
 		"heavy": {
 			maxScore:  0,
-			primary:   "codex-cli-local",
+			primary:   "gpt-5.4",
 			fallbacks: []string{},
 		},
 	}
@@ -372,6 +372,7 @@ func TestDefaultConfig_TieredModelAliasesPresent(t *testing.T) {
 		"codex-cli-local": "codex-cli/codex",
 		"gpt-5.4-mini":    "openai/gpt-5.4-mini",
 		"gpt-5.4":         "openai/gpt-5.4",
+		"gpt-5.4-nano":    "openai/gpt-5.4-nano",
 	}
 
 	modelsByName := make(map[string]*ModelConfig, len(cfg.ModelList))
@@ -502,7 +503,7 @@ func TestSaveConfig_IncludesHydratedDefaultModelField(t *testing.T) {
 		t.Fatalf("ReadFile failed: %v", err)
 	}
 
-	if !strings.Contains(string(data), `"model_name": "codex-cli-local"`) {
+	if !strings.Contains(string(data), `"model_name": "gpt-5.4-mini"`) {
 		t.Fatalf("saved config should include hydrated default model_name, got: %s", string(data))
 	}
 }

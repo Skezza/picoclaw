@@ -312,9 +312,9 @@ func TestConfig_ValidateRouting(t *testing.T) {
 						Routing: &RoutingConfig{
 							PaidTier: "heavy",
 							Tiers: []RoutingTierConfig{
-								{Name: "fast", Model: &AgentModelConfig{Primary: "codex-cli-local"}},
-								{Name: "tools", Model: &AgentModelConfig{Primary: "codex-cli-local"}},
-								{Name: "heavy", Model: &AgentModelConfig{Primary: "codex-cli-local"}},
+								{Name: "fast", Model: &AgentModelConfig{Primary: "gpt-5.4-nano"}},
+								{Name: "tools", Model: &AgentModelConfig{Primary: "gpt-5.4-mini"}},
+								{Name: "heavy", Model: &AgentModelConfig{Primary: "gpt-5.4"}},
 							},
 						},
 					},

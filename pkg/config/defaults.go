@@ -22,7 +22,7 @@ func DefaultConfig() *Config {
 				Workspace:                 workspacePath,
 				RestrictToWorkspace:       true,
 				Provider:                  "",
-				ModelName:                 "codex-cli-local",
+				ModelName:                 "gpt-5.4-mini",
 				ModelFallbacks:            []string{},
 				MaxTokens:                 32768,
 				Temperature:               nil, // nil means use provider default
@@ -37,21 +37,21 @@ func DefaultConfig() *Config {
 							Name:     "fast",
 							MaxScore: 0.20,
 							Model: &AgentModelConfig{
-								Primary:   "codex-cli-local",
+								Primary:   "gpt-5.4-nano",
 								Fallbacks: []string{},
 							},
 						},
 						{
 							Name: "tools",
 							Model: &AgentModelConfig{
-								Primary:   "codex-cli-local",
+								Primary:   "gpt-5.4-mini",
 								Fallbacks: []string{},
 							},
 						},
 						{
 							Name: "heavy",
 							Model: &AgentModelConfig{
-								Primary:   "codex-cli-local",
+								Primary:   "gpt-5.4",
 								Fallbacks: []string{},
 							},
 						},
@@ -210,6 +210,12 @@ func DefaultConfig() *Config {
 			{
 				ModelName:  "gpt-5.4-mini",
 				Model:      "openai/gpt-5.4-mini",
+				APIBase:    "https://api.openai.com/v1",
+				AuthMethod: "oauth",
+			},
+			{
+				ModelName:  "gpt-5.4-nano",
+				Model:      "openai/gpt-5.4-nano",
 				APIBase:    "https://api.openai.com/v1",
 				AuthMethod: "oauth",
 			},
