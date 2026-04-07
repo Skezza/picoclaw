@@ -34,11 +34,11 @@ unit_dir="$HOME/.config/systemd/user"
 unit_name="picoclaw-self-improve-$TARGET_NAME.service"
 unit_path="$unit_dir/$unit_name"
 
-if [[ ! -x "$poller_script" ]]; then
+if [[ ! -f "$poller_script" ]]; then
   echo "Poller script not found: $poller_script" >&2
   exit 1
 fi
-if [[ ! -x "$deploy_script" ]]; then
+if [[ ! -f "$deploy_script" ]]; then
   echo "Deploy script not found: $deploy_script" >&2
   exit 1
 fi
