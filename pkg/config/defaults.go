@@ -158,7 +158,7 @@ func DefaultConfig() *Config {
 		SelfImprove: SelfImproveConfig{
 			Enabled:             false,
 			Repo:                "",
-			SSHPreferred:        true,
+			SSHPreferred:        false,
 			PublishBranchPrefix: "self-improve",
 			Targets:             map[string]SelfImproveTargetConfig{},
 		},

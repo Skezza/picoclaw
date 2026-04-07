@@ -193,8 +193,11 @@ func (al *AgentLoop) selfImproveShip(scopeKey string, cfg *config.Config, agent 
 	if deployBranch == "" {
 		return "", fmt.Errorf("self-improve target %q does not define a deploy_branch", targetName)
 	}
+	if err := validateSelfImproveDeployBranch(deployBranch); err != nil {
+		return "", err
+	}
 
-	run, err := al.latestSuccessfulSelfImproveRun(scopeKey)
+	run, err := al.latestShippableSelfImproveRun(scopeKey)
 	if err != nil {
 		return "", err
 	}
@@ -262,15 +265,15 @@ func (al *AgentLoop) selfImproveShip(scopeKey string, cfg *config.Config, agent 
 	}, "\n"), nil
 }
 
-func (al *AgentLoop) latestSuccessfulSelfImproveRun(scopeKey string) (*codexRunRecord, error) {
+func (al *AgentLoop) latestShippableSelfImproveRun(scopeKey string) (*codexRunRecord, error) {
 	runs := al.codexStore.ListRuns(scopeKey)
 	for i := range runs {
 		run := runs[i]
-		if !strings.EqualFold(strings.TrimSpace(run.Status), codexRunStatusSucceeded) {
-			continue
-		}
 		if strings.EqualFold(strings.TrimSpace(run.Mode), "deploy") {
 			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(run.Status), codexRunStatusSucceeded) {
+			return nil, fmt.Errorf("latest self-improve run %s is %s; only the latest successful run can be shipped", run.ID, strings.TrimSpace(run.Status))
 		}
 		return &run, nil
 	}
@@ -290,7 +293,8 @@ func ensureGitRemoteForSelfImprove(repoPath string, cfg config.SelfImproveConfig
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(current) == expected {
+	current = strings.TrimSpace(current)
+	if current != "" {
 		return nil
 	}
 	_, err = gitOutput(repoPath, "remote", "set-url", "origin", expected)
@@ -355,11 +359,12 @@ func validateSelfImproveWorktree(worktree string) error {
 		{goBin, "build", "-v", "-tags", "goolm,stdjson", "-o", filepath.Join(tmpDir, "picoclaw"), "./cmd/picoclaw"},
 		{goBin, "build", "-v", "-tags", "goolm,stdjson", "-o", filepath.Join(tmpDir, "picoclaw-launcher"), "./web/backend"},
 	}
-	if dirExists(filepath.Join(worktree, "cmd", "picoclaw-mcp-fs")) {
-		steps = append(steps, []string{goBin, "build", "-v", "-tags", "goolm,stdjson", "-o", filepath.Join(tmpDir, "picoclaw-mcp-fs"), "./cmd/picoclaw-mcp-fs"})
+	mcpBinaries, err := listSelfImproveMCPBinaries(worktree)
+	if err != nil {
+		return err
 	}
-	if dirExists(filepath.Join(worktree, "cmd", "picoclaw-mcp-homeassistant")) {
-		steps = append(steps, []string{goBin, "build", "-v", "-tags", "goolm,stdjson", "-o", filepath.Join(tmpDir, "picoclaw-mcp-homeassistant"), "./cmd/picoclaw-mcp-homeassistant"})
+	for _, name := range mcpBinaries {
+		steps = append(steps, []string{goBin, "build", "-v", "-tags", "goolm,stdjson", "-o", filepath.Join(tmpDir, name), "./cmd/" + name})
 	}
 	for _, step := range steps {
 		cmd := exec.CommandContext(ctx, step[0], step[1:]...)
@@ -377,6 +382,43 @@ func validateSelfImproveWorktree(worktree string) error {
 		}
 	}
 	return nil
+}
+
+func validateSelfImproveDeployBranch(branch string) error {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return fmt.Errorf("deploy branch is required")
+	}
+	if branch == "main" || branch == "master" {
+		return fmt.Errorf("self-improve deploy branch %q is unsafe; use a dedicated deploy/* branch", branch)
+	}
+	if !strings.HasPrefix(branch, "deploy/") {
+		return fmt.Errorf("self-improve deploy branch %q is unsafe; deploy targets must use a deploy/* branch", branch)
+	}
+	return nil
+}
+
+func listSelfImproveMCPBinaries(worktree string) ([]string, error) {
+	cmdDir := filepath.Join(worktree, "cmd")
+	entries, err := os.ReadDir(cmdDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var names []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := strings.TrimSpace(entry.Name())
+		if strings.HasPrefix(name, "picoclaw-mcp-") {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 func collectSelfImproveChanges(worktree string) ([]selfImproveChange, error) {
