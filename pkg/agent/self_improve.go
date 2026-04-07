@@ -18,6 +18,13 @@ const (
 	selfImproveValidateTimeout  = 12 * time.Minute
 )
 
+type selfImproveChange struct {
+	Status    string
+	Path      string
+	OldPath   string
+	Committed bool
+}
+
 func (al *AgentLoop) selfImproveTargets(cfg *config.Config) []string {
 	if cfg == nil {
 		return nil
@@ -316,6 +323,14 @@ func syncSelfImproveRepo(repoPath string) error {
 }
 
 func validateSelfImproveWorktree(worktree string) error {
+	changes, err := collectSelfImproveChanges(worktree)
+	if err != nil {
+		return err
+	}
+	if err := validateSelfImproveArchitecturePolicy(changes); err != nil {
+		return err
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), selfImproveValidateTimeout)
 	defer cancel()
 
@@ -362,6 +377,159 @@ func validateSelfImproveWorktree(worktree string) error {
 		}
 	}
 	return nil
+}
+
+func collectSelfImproveChanges(worktree string) ([]selfImproveChange, error) {
+	baseRef, err := selfImproveDefaultBranchRef(worktree)
+	if err != nil {
+		return nil, err
+	}
+	mergeBase, err := gitOutput(worktree, "merge-base", "HEAD", baseRef)
+	if err != nil {
+		return nil, err
+	}
+	mergeBase = strings.TrimSpace(mergeBase)
+	if mergeBase == "" {
+		return nil, fmt.Errorf("failed to determine merge base for self-improve worktree")
+	}
+
+	seen := map[string]selfImproveChange{}
+	add := func(change selfImproveChange) {
+		change.Path = filepath.ToSlash(strings.TrimSpace(change.Path))
+		change.OldPath = filepath.ToSlash(strings.TrimSpace(change.OldPath))
+		if change.Path == "" {
+			return
+		}
+		key := change.Status + "|" + change.Path + "|" + change.OldPath
+		seen[key] = change
+	}
+
+	if committedOut, err := gitOutput(worktree, "diff", "--name-status", mergeBase+"..HEAD"); err != nil {
+		return nil, err
+	} else {
+		for _, change := range parseNameStatusChanges(committedOut, true) {
+			add(change)
+		}
+	}
+	if workingOut, err := gitOutput(worktree, "status", "--porcelain", "--untracked-files=all"); err != nil {
+		return nil, err
+	} else {
+		for _, change := range parseStatusPorcelainChanges(workingOut) {
+			add(change)
+		}
+	}
+
+	changes := make([]selfImproveChange, 0, len(seen))
+	for _, change := range seen {
+		changes = append(changes, change)
+	}
+	sort.Slice(changes, func(i, j int) bool {
+		if changes[i].Path == changes[j].Path {
+			if changes[i].Status == changes[j].Status {
+				return changes[i].OldPath < changes[j].OldPath
+			}
+			return changes[i].Status < changes[j].Status
+		}
+		return changes[i].Path < changes[j].Path
+	})
+	return changes, nil
+}
+
+func selfImproveDefaultBranchRef(worktree string) (string, error) {
+	ref, err := gitOutput(worktree, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+	if err == nil {
+		ref = strings.TrimSpace(ref)
+		if ref != "" {
+			return ref, nil
+		}
+	}
+	return "origin/main", nil
+}
+
+func parseNameStatusChanges(raw string, committed bool) []selfImproveChange {
+	lines := strings.Split(strings.TrimSpace(raw), "\n")
+	changes := make([]selfImproveChange, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) < 2 {
+			continue
+		}
+		status := strings.TrimSpace(fields[0])
+		change := selfImproveChange{
+			Status:    status,
+			Committed: committed,
+		}
+		if strings.HasPrefix(status, "R") || strings.HasPrefix(status, "C") {
+			if len(fields) < 3 {
+				continue
+			}
+			change.OldPath = fields[1]
+			change.Path = fields[2]
+		} else {
+			change.Path = fields[1]
+		}
+		changes = append(changes, change)
+	}
+	return changes
+}
+
+func parseStatusPorcelainChanges(raw string) []selfImproveChange {
+	lines := strings.Split(strings.TrimSpace(raw), "\n")
+	changes := make([]selfImproveChange, 0, len(lines))
+	for _, line := range lines {
+		if len(line) < 4 {
+			continue
+		}
+		status := strings.TrimSpace(line[:2])
+		pathPart := strings.TrimSpace(line[3:])
+		change := selfImproveChange{Status: status}
+		if strings.Contains(pathPart, " -> ") && (strings.Contains(status, "R") || strings.Contains(status, "C")) {
+			parts := strings.SplitN(pathPart, " -> ", 2)
+			change.OldPath = parts[0]
+			change.Path = parts[1]
+		} else {
+			change.Path = pathPart
+		}
+		changes = append(changes, change)
+	}
+	return changes
+}
+
+func validateSelfImproveArchitecturePolicy(changes []selfImproveChange) error {
+	var violations []string
+	for _, change := range changes {
+		path := filepath.ToSlash(strings.TrimSpace(change.Path))
+		if path == "" || !selfImproveAddsPath(change.Status) {
+			continue
+		}
+		if !strings.HasPrefix(path, "pkg/tools/") || strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		violations = append(violations, path)
+	}
+	if len(violations) == 0 {
+		return nil
+	}
+	sort.Strings(violations)
+	return fmt.Errorf(
+		"self-improve ship policy violation: new non-test files under pkg/tools are not allowed for external integrations (%s). External integrations must be MCPs with entrypoints under cmd/picoclaw-mcp-*",
+		strings.Join(violations, ", "),
+	)
+}
+
+func selfImproveAddsPath(status string) bool {
+	status = strings.TrimSpace(status)
+	if status == "" {
+		return false
+	}
+	if status == "??" {
+		return true
+	}
+	return strings.HasPrefix(status, "A") || strings.HasPrefix(status, "R") || strings.HasPrefix(status, "C")
 }
 
 func dirExists(path string) bool {
