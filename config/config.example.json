@@ -573,7 +573,7 @@
   "self_improve": {
     "enabled": false,
     "repo": "",
-    "ssh_preferred": true,
+    "ssh_preferred": false,
     "publish_branch_prefix": "self-improve",
     "targets": {
       "quanta": {
@@ -581,6 +581,7 @@
         "deploy_branch": "deploy/quanta",
         "service_name": "picoclaw.service",
         "health_url": "http://127.0.0.1:18790/ready",
+        "allow_health_fallback": false,
         "poll_interval_seconds": 60,
         "install_root": "/home/joe/.local/lib/picoclaw"
       }

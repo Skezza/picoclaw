@@ -212,12 +212,9 @@ func (al *AgentLoop) selfImproveShip(scopeKey string, cfg *config.Config, agent 
 		return "", err
 	}
 
-	if dirty, err := gitOutput(run.WorktreePath, "status", "--porcelain"); err != nil {
+	if staged, err := stageSelfImproveWorkingChanges(run.WorktreePath); err != nil {
 		return "", err
-	} else if strings.TrimSpace(dirty) != "" {
-		if _, err := gitOutput(run.WorktreePath, "add", "-A"); err != nil {
-			return "", err
-		}
+	} else if staged {
 		msg := fmt.Sprintf("self-improve: publish %s for %s", run.ID, targetName)
 		if _, err := gitOutput(run.WorktreePath, "commit", "-m", msg); err != nil {
 			return "", err
@@ -331,7 +328,7 @@ func validateSelfImproveWorktree(worktree string) error {
 	if err != nil {
 		return err
 	}
-	if err := validateSelfImproveArchitecturePolicy(changes); err != nil {
+	if err := validateSelfImproveArchitecturePolicy(worktree, changes); err != nil {
 		return err
 	}
 
@@ -384,6 +381,32 @@ func validateSelfImproveWorktree(worktree string) error {
 	return nil
 }
 
+func stageSelfImproveWorkingChanges(worktree string) (bool, error) {
+	changes, err := collectSelfImproveWorkingChanges(worktree)
+	if err != nil {
+		return false, err
+	}
+	paths, err := selfImproveStageablePaths(changes)
+	if err != nil {
+		return false, err
+	}
+	if len(paths) == 0 {
+		return false, nil
+	}
+	args := append([]string{"add", "-A", "--"}, paths...)
+	if _, err := gitOutput(worktree, args...); err != nil {
+		return false, err
+	}
+	hasChanges, err := gitHasSelfImproveStagedChanges(worktree)
+	if err != nil {
+		return false, err
+	}
+	if !hasChanges {
+		return false, nil
+	}
+	return true, nil
+}
+
 func validateSelfImproveDeployBranch(branch string) error {
 	branch = strings.TrimSpace(branch)
 	if branch == "" {
@@ -419,6 +442,14 @@ func listSelfImproveMCPBinaries(worktree string) ([]string, error) {
 	}
 	sort.Strings(names)
 	return names, nil
+}
+
+func collectSelfImproveWorkingChanges(worktree string) ([]selfImproveChange, error) {
+	workingOut, err := gitOutput(worktree, "status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return nil, err
+	}
+	return parseStatusPorcelainChanges(workingOut), nil
 }
 
 func collectSelfImproveChanges(worktree string) ([]selfImproveChange, error) {
@@ -475,6 +506,103 @@ func collectSelfImproveChanges(worktree string) ([]selfImproveChange, error) {
 		return changes[i].Path < changes[j].Path
 	})
 	return changes, nil
+}
+
+func selfImproveStageablePaths(changes []selfImproveChange) ([]string, error) {
+	var blocked []string
+	seen := map[string]struct{}{}
+	var paths []string
+	for _, change := range changes {
+		for _, raw := range []string{change.OldPath, change.Path} {
+			path := filepath.ToSlash(strings.TrimSpace(raw))
+			if path == "" {
+				continue
+			}
+			if selfImproveIgnoredWorkingPath(path) {
+				continue
+			}
+			if selfImproveBlockedWorkingPath(path) {
+				blocked = append(blocked, path)
+				continue
+			}
+			if _, ok := seen[path]; ok {
+				continue
+			}
+			seen[path] = struct{}{}
+			paths = append(paths, path)
+		}
+	}
+	if len(blocked) > 0 {
+		sort.Strings(blocked)
+		return nil, fmt.Errorf("self-improve ship refused to publish suspicious working-tree paths: %s", strings.Join(blocked, ", "))
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+func selfImproveIgnoredWorkingPath(path string) bool {
+	path = filepath.ToSlash(strings.TrimSpace(path))
+	if path == "" {
+		return true
+	}
+	for _, prefix := range []string{
+		".tmp/",
+		"tmp/",
+	} {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func selfImproveBlockedWorkingPath(path string) bool {
+	path = strings.ToLower(filepath.ToSlash(strings.TrimSpace(path)))
+	if path == "" {
+		return false
+	}
+	base := filepath.Base(path)
+	switch {
+	case base == ".ds_store",
+		base == ".env",
+		strings.HasPrefix(base, ".env."),
+		strings.HasSuffix(base, ".log"),
+		strings.HasSuffix(base, ".tmp"),
+		strings.HasSuffix(base, ".swp"),
+		strings.HasSuffix(base, ".bak"),
+		strings.HasSuffix(base, ".sqlite"),
+		strings.HasSuffix(base, ".db"),
+		strings.HasSuffix(base, ".pem"),
+		strings.HasSuffix(base, ".key"),
+		strings.Contains(base, "secret"),
+		strings.Contains(base, "token"):
+		return true
+	}
+	for _, prefix := range []string{
+		"secrets/",
+		".secrets/",
+	} {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func gitHasSelfImproveStagedChanges(worktree string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--quiet")
+	cmd.Dir = worktree
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return true, nil
+		}
+		return false, fmt.Errorf("git diff --cached --quiet failed: %w", err)
+	}
+	return false, nil
 }
 
 func selfImproveDefaultBranchRef(worktree string) (string, error) {
@@ -541,17 +669,26 @@ func parseStatusPorcelainChanges(raw string) []selfImproveChange {
 	return changes
 }
 
-func validateSelfImproveArchitecturePolicy(changes []selfImproveChange) error {
+func validateSelfImproveArchitecturePolicy(worktree string, changes []selfImproveChange) error {
 	var violations []string
+	mcpDirs := map[string]struct{}{}
 	for _, change := range changes {
 		path := filepath.ToSlash(strings.TrimSpace(change.Path))
 		if path == "" || !selfImproveAddsPath(change.Status) {
 			continue
 		}
+		if dir, ok := selfImproveMCPDir(path); ok {
+			mcpDirs[dir] = struct{}{}
+		}
 		if !strings.HasPrefix(path, "pkg/tools/") || strings.HasSuffix(path, "_test.go") {
 			continue
 		}
 		violations = append(violations, path)
+	}
+	for dir := range mcpDirs {
+		if _, err := os.Stat(filepath.Join(worktree, dir, "main.go")); err != nil {
+			violations = append(violations, dir+"/main.go (missing)")
+		}
 	}
 	if len(violations) == 0 {
 		return nil
@@ -561,6 +698,18 @@ func validateSelfImproveArchitecturePolicy(changes []selfImproveChange) error {
 		"self-improve ship policy violation: new non-test files under pkg/tools are not allowed for external integrations (%s). External integrations must be MCPs with entrypoints under cmd/picoclaw-mcp-*",
 		strings.Join(violations, ", "),
 	)
+}
+
+func selfImproveMCPDir(path string) (string, bool) {
+	path = filepath.ToSlash(strings.TrimSpace(path))
+	if !strings.HasPrefix(path, "cmd/picoclaw-mcp-") {
+		return "", false
+	}
+	parts := strings.Split(path, "/")
+	if len(parts) < 2 {
+		return "", false
+	}
+	return strings.Join(parts[:2], "/"), true
 }
 
 func selfImproveAddsPath(status string) bool {
