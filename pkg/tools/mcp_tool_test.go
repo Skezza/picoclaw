@@ -178,6 +178,15 @@ func TestMCPTool_Parameters(t *testing.T) {
 			expectProperty: false,
 		},
 		{
+			name: "object schema without properties",
+			inputSchema: map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+			},
+			expectType:     "object",
+			expectProperty: false,
+		},
+		{
 			name: "json.RawMessage schema",
 			inputSchema: []byte(`{
 				"type": "object",
@@ -216,6 +225,12 @@ func TestMCPTool_Parameters(t *testing.T) {
 
 			if params["type"] != tt.expectType {
 				t.Errorf("Expected type '%s', got '%v'", tt.expectType, params["type"])
+			}
+
+			if tt.expectType == "object" {
+				if _, ok := params["properties"].(map[string]any); !ok {
+					t.Fatalf("Expected object schema to include properties map, got %#v", params["properties"])
+				}
 			}
 
 			// Check if property exists when expected
