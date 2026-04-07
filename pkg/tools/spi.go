@@ -98,7 +98,7 @@ func (t *SPITool) list() *ToolResult {
 
 	if len(matches) == 0 {
 		return SilentResult(
-			"No SPI devices found. You may need to:\n1. Enable SPI in device tree\n2. Configure pinmux for your board (see hardware skill)\n3. Check that spidev module is loaded",
+			"No SPI devices found. You may need to:\n1. Enable SPI in device tree\n2. Configure pinmux for your board\n3. Check that spidev module is loaded",
 		)
 	}
 

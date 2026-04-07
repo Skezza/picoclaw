@@ -96,7 +96,7 @@ func (t *I2CTool) detect() *ToolResult {
 
 	if len(matches) == 0 {
 		return SilentResult(
-			"No I2C buses found. You may need to:\n1. Load the i2c-dev module: modprobe i2c-dev\n2. Check that I2C is enabled in device tree\n3. Configure pinmux for your board (see hardware skill)",
+			"No I2C buses found. You may need to:\n1. Load the i2c-dev module: modprobe i2c-dev\n2. Check that I2C is enabled in device tree\n3. Configure pinmux for your board",
 		)
 	}
 
