@@ -13,26 +13,26 @@ func newModeTestRuntime() *Runtime {
 		Config: &config.Config{
 			Agents: config.AgentsConfig{
 				Defaults: config.AgentDefaults{
-					ModelName: "gpt-5-mini",
+					ModelName: "codex-cli-local",
 					Routing: &config.RoutingConfig{
 						PaidTier: "heavy",
 						Tiers: []config.RoutingTierConfig{
 							{
 								Name: "fast",
 								Model: &config.AgentModelConfig{
-									Primary: "gpt-5.4-nano",
+									Primary: "codex-cli-local",
 								},
 							},
 							{
 								Name: "tools",
 								Model: &config.AgentModelConfig{
-									Primary: "gpt-5.4-mini",
+									Primary: "codex-cli-local",
 								},
 							},
 							{
 								Name: "heavy",
 								Model: &config.AgentModelConfig{
-									Primary: "gpt-5-mini",
+									Primary: "codex-cli-local",
 								},
 							},
 						},
@@ -67,7 +67,7 @@ func TestBoostCommand_ArmsNextModel(t *testing.T) {
 	if armed != "tier:heavy" {
 		t.Fatalf("armed=%q, want %q", armed, "tier:heavy")
 	}
-	if reply != "Boost armed. Next message will use gpt-5-mini." {
+	if reply != "Boost armed. Next message will use codex-cli-local." {
 		t.Fatalf("reply=%q, want boost confirmation", reply)
 	}
 }
@@ -104,7 +104,7 @@ func TestPaidCommand_SetsPersistentModel(t *testing.T) {
 	if workMode != "" {
 		t.Fatalf("workMode=%q, want cleared", workMode)
 	}
-	if reply != "Legacy paid mode set to heavy (gpt-5-mini)." {
+	if reply != "Legacy paid mode set to heavy (codex-cli-local)." {
 		t.Fatalf("reply=%q, want paid confirmation", reply)
 	}
 }
@@ -140,7 +140,7 @@ func TestCodeCommand_SetsWorkModeAndPaidModel(t *testing.T) {
 	if workMode != "code" {
 		t.Fatalf("workMode=%q, want %q", workMode, "code")
 	}
-	if reply != "Session mode set to code (gpt-5.4-mini)." {
+	if reply != "Session mode set to code (codex-cli-local)." {
 		t.Fatalf("reply=%q, want code confirmation", reply)
 	}
 }
@@ -150,14 +150,14 @@ func TestSessionModeTargets_DefaultConfigAlignsWithRoutingDefaults(t *testing.T)
 
 	targets := sessionModeTargets(rt)
 
-	if targets.Fast.Target != "tier:fast" || targets.Fast.Label != "gpt-5.4-nano" {
-		t.Fatalf("fast=%+v, want tier:fast / gpt-5.4-nano", targets.Fast)
+	if targets.Fast.Target != "tier:fast" || targets.Fast.Label != "codex-cli-local" {
+		t.Fatalf("fast=%+v, want tier:fast / codex-cli-local", targets.Fast)
 	}
-	if targets.Tools.Target != "tier:tools" || targets.Tools.Label != "gpt-5.4-mini" {
-		t.Fatalf("tools=%+v, want tier:tools / gpt-5.4-mini", targets.Tools)
+	if targets.Tools.Target != "tier:tools" || targets.Tools.Label != "codex-cli-local" {
+		t.Fatalf("tools=%+v, want tier:tools / codex-cli-local", targets.Tools)
 	}
-	if targets.Heavy.Target != "tier:heavy" || targets.Heavy.Label != "gpt-5-mini" {
-		t.Fatalf("heavy=%+v, want tier:heavy / gpt-5-mini", targets.Heavy)
+	if targets.Heavy.Target != "tier:heavy" || targets.Heavy.Label != "codex-cli-local" {
+		t.Fatalf("heavy=%+v, want tier:heavy / codex-cli-local", targets.Heavy)
 	}
 }
 
@@ -255,12 +255,12 @@ func TestStatusCommand_ReportsPendingBoost(t *testing.T) {
 	}
 	if !containsAll(reply, []string{
 		"Current Model: gpt-5.4-mini (Provider: openai)",
-		"Session Mode: boost armed for next message (gpt-5-mini)",
+		"Session Mode: boost armed for next message (codex-cli-local)",
 		"Work Mode: code",
-		"Pending Boost: gpt-5-mini",
-		"Fast Model: gpt-5.4-nano",
-		"Heavy Model: gpt-5-mini",
-		"Tools Model: gpt-5.4-mini",
+		"Pending Boost: codex-cli-local",
+		"Fast Model: codex-cli-local",
+		"Heavy Model: codex-cli-local",
+		"Tools Model: codex-cli-local",
 	}) {
 		t.Fatalf("reply=%q, missing expected status content", reply)
 	}

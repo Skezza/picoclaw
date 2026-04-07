@@ -2522,7 +2522,7 @@ func TestProcessMessage_TieredRoutingUsesToolsTierForRepoPrompt(t *testing.T) {
 	fastServer := newStrictChatCompletionTestServer(
 		t,
 		"fast",
-		"gpt-5.4-nano",
+		"gpt-5.4-mini",
 		"fast reply",
 		&fastCalls,
 	)
@@ -2542,7 +2542,7 @@ func TestProcessMessage_TieredRoutingUsesToolsTierForRepoPrompt(t *testing.T) {
 	heavyServer := newStrictChatCompletionTestServer(
 		t,
 		"heavy",
-		"gpt-5-mini",
+		"gpt-5.4",
 		"heavy reply",
 		&heavyCalls,
 	)
@@ -2552,24 +2552,24 @@ func TestProcessMessage_TieredRoutingUsesToolsTierForRepoPrompt(t *testing.T) {
 		Agents: config.AgentsConfig{
 			Defaults: config.AgentDefaults{
 				Workspace:         tmpDir,
-				ModelName:         "gpt-5-mini",
+				ModelName:         "gpt-5.4",
 				MaxTokens:         4096,
 				MaxToolIterations: 10,
 				Routing: &config.RoutingConfig{
 					Enabled:  true,
 					PaidTier: "heavy",
 					Tiers: []config.RoutingTierConfig{
-						{Name: "fast", MaxScore: 0.20, Model: &config.AgentModelConfig{Primary: "gpt-5.4-nano"}},
-						{Name: "tools", MaxScore: 0, Model: &config.AgentModelConfig{Primary: "gpt-5.4-mini"}},
-						{Name: "heavy", MaxScore: 0, Model: &config.AgentModelConfig{Primary: "gpt-5-mini"}},
+						{Name: "fast", MaxScore: 0.20, Model: &config.AgentModelConfig{Primary: "gpt-5.4-mini"}},
+						{Name: "tools", MaxScore: 0, Model: &config.AgentModelConfig{Primary: "gpt-5.4-tools"}},
+						{Name: "heavy", MaxScore: 0, Model: &config.AgentModelConfig{Primary: "gpt-5.4"}},
 					},
 				},
 			},
 		},
 		ModelList: []*config.ModelConfig{
-			{ModelName: "gpt-5.4-nano", Model: "openai/gpt-5.4-nano", APIBase: fastServer.URL, APIKeys: config.SimpleSecureStrings("fast-key")},
-			{ModelName: "gpt-5.4-mini", Model: "openai/gpt-5.4-mini", APIBase: toolsServer.URL, APIKeys: config.SimpleSecureStrings("tools-key")},
-			{ModelName: "gpt-5-mini", Model: "openai/gpt-5-mini", APIBase: heavyServer.URL, APIKeys: config.SimpleSecureStrings("heavy-key")},
+			{ModelName: "gpt-5.4-mini", Model: "openai/gpt-5.4-mini", APIBase: fastServer.URL, APIKeys: config.SimpleSecureStrings("fast-key")},
+			{ModelName: "gpt-5.4-tools", Model: "openai/gpt-5.4-mini", APIBase: toolsServer.URL, APIKeys: config.SimpleSecureStrings("tools-key")},
+			{ModelName: "gpt-5.4", Model: "openai/gpt-5.4", APIBase: heavyServer.URL, APIKeys: config.SimpleSecureStrings("heavy-key")},
 		},
 	}
 

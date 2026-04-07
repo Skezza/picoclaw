@@ -37,6 +37,8 @@ func agentCmd(message, sessionKey, model string, debug bool) error {
 
 	if model != "" {
 		cfg.Agents.Defaults.ModelName = model
+		cfg.Agents.Defaults.ModelFallbacks = nil
+		cfg.Agents.Defaults.Routing = nil
 	}
 
 	provider, modelID, err := providers.CreateProvider(cfg)

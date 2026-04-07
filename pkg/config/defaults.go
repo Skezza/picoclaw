@@ -22,8 +22,8 @@ func DefaultConfig() *Config {
 				Workspace:                 workspacePath,
 				RestrictToWorkspace:       true,
 				Provider:                  "",
-				ModelName:                 "gpt-5.4-mini",
-				ModelFallbacks:            []string{"gpt-5-mini"},
+				ModelName:                 "codex-cli-local",
+				ModelFallbacks:            []string{},
 				MaxTokens:                 32768,
 				Temperature:               nil, // nil means use provider default
 				MaxToolIterations:         50,
@@ -37,22 +37,22 @@ func DefaultConfig() *Config {
 							Name:     "fast",
 							MaxScore: 0.20,
 							Model: &AgentModelConfig{
-								Primary:   "gpt-5.4-nano",
-								Fallbacks: []string{"gpt-5-nano"},
+								Primary:   "codex-cli-local",
+								Fallbacks: []string{},
 							},
 						},
 						{
 							Name: "tools",
 							Model: &AgentModelConfig{
-								Primary:   "gpt-5.4-mini",
-								Fallbacks: []string{"gpt-5-mini"},
+								Primary:   "codex-cli-local",
+								Fallbacks: []string{},
 							},
 						},
 						{
 							Name: "heavy",
 							Model: &AgentModelConfig{
-								Primary:   "gpt-5-mini",
-								Fallbacks: []string{"gpt-5.4-mini"},
+								Primary:   "codex-cli-local",
+								Fallbacks: []string{},
 							},
 						},
 					},
@@ -194,31 +194,24 @@ func DefaultConfig() *Config {
 				APIBase:   "https://open.bigmodel.cn/api/paas/v4",
 			},
 
+			{
+				ModelName: "codex-cli-local",
+				Model:     "codex-cli/codex",
+				Workspace: workspacePath,
+			},
+
 			// OpenAI - https://platform.openai.com/api-keys
 			{
-				ModelName: "gpt-5.4",
-				Model:     "openai/gpt-5.4",
-				APIBase:   "https://api.openai.com/v1",
+				ModelName:  "gpt-5.4",
+				Model:      "openai/gpt-5.4",
+				APIBase:    "https://api.openai.com/v1",
+				AuthMethod: "oauth",
 			},
 			{
-				ModelName: "gpt-5.4-mini",
-				Model:     "openai/gpt-5.4-mini",
-				APIBase:   "https://api.openai.com/v1",
-			},
-			{
-				ModelName: "gpt-5-mini",
-				Model:     "openai/gpt-5-mini",
-				APIBase:   "https://api.openai.com/v1",
-			},
-			{
-				ModelName: "gpt-5.4-nano",
-				Model:     "openai/gpt-5.4-nano",
-				APIBase:   "https://api.openai.com/v1",
-			},
-			{
-				ModelName: "gpt-5-nano",
-				Model:     "openai/gpt-5-nano",
-				APIBase:   "https://api.openai.com/v1",
+				ModelName:  "gpt-5.4-mini",
+				Model:      "openai/gpt-5.4-mini",
+				APIBase:    "https://api.openai.com/v1",
+				AuthMethod: "oauth",
 			},
 
 			// Anthropic Claude - https://console.anthropic.com/settings/keys
