@@ -60,6 +60,7 @@ func (p *CodexProvider) Chat(
 ) (*LLMResponse, error) {
 	var opts []option.RequestOption
 	accountID := p.accountID
+	var outputItems []responses.ResponseOutputItemUnion
 	resolvedModel, fallbackReason := resolveCodexModel(model)
 	if fallbackReason != "" {
 		logger.WarnCF(
@@ -106,6 +107,9 @@ func (p *CodexProvider) Chat(
 	var resp *responses.Response
 	for stream.Next() {
 		evt := stream.Current()
+		if evt.Type == "response.output_item.done" && evt.Item.Type != "" {
+			outputItems = append(outputItems, evt.Item)
+		}
 		if evt.Type == "response.completed" || evt.Type == "response.failed" || evt.Type == "response.incomplete" {
 			evtResp := evt.Response
 			if evtResp.ID != "" {
@@ -142,6 +146,13 @@ func (p *CodexProvider) Chat(
 		return nil, fmt.Errorf("codex API call: %w", err)
 	}
 	if resp == nil {
+		if len(outputItems) > 0 {
+			resp = &responses.Response{
+				Output: outputItems,
+			}
+		}
+	}
+	if resp == nil {
 		fields := map[string]any{
 			"requested_model":    model,
 			"resolved_model":     resolvedModel,
@@ -151,6 +162,9 @@ func (p *CodexProvider) Chat(
 		}
 		logger.ErrorCF("provider.codex", "Codex stream ended without completed response event", fields)
 		return nil, fmt.Errorf("codex API call: stream ended without completed response")
+	}
+	if len(resp.Output) == 0 && len(outputItems) > 0 {
+		resp.Output = outputItems
 	}
 
 	return orc.ParseResponseFromStruct(resp), nil

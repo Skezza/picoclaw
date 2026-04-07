@@ -581,6 +581,35 @@ func TestCodexProvider_ChatRoundTrip_ModelFallbackFromUnsupported(t *testing.T) 
 	}
 }
 
+func TestCodexProvider_ChatRoundTrip_UsesOutputItemDoneWhenCompletedOutputEmpty(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			http.Error(w, "not found: "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: response.created\n")
+		fmt.Fprint(w, `data: {"type":"response.created","sequence_number":1,"response":{"id":"resp_test","status":"in_progress","output":[]}}`+"\n\n")
+		fmt.Fprint(w, "event: response.output_item.done\n")
+		fmt.Fprint(w, `data: {"type":"response.output_item.done","sequence_number":2,"output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Hello from output item"}]}}`+"\n\n")
+		fmt.Fprint(w, "event: response.completed\n")
+		fmt.Fprint(w, `data: {"type":"response.completed","sequence_number":3,"response":{"id":"resp_test","status":"completed","output":[],"usage":{"input_tokens":10,"output_tokens":4,"total_tokens":14,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	provider := NewCodexProvider("test-token", "acc-123")
+	provider.client = createOpenAITestClient(server.URL, "test-token", "acc-123")
+
+	resp, err := provider.Chat(t.Context(), []Message{{Role: "user", Content: "Hello"}}, nil, "gpt-5.4-mini", nil)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if resp.Content != "Hello from output item" {
+		t.Fatalf("Content = %q, want %q", resp.Content, "Hello from output item")
+	}
+}
+
 func TestCodexProvider_GetDefaultModel(t *testing.T) {
 	p := NewCodexProvider("test-token", "")
 	if got := p.GetDefaultModel(); got != codexDefaultModel {

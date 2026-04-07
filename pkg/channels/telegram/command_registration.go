@@ -29,8 +29,15 @@ func commandRegistrationDelay(attempt int) time.Duration {
 	return time.Duration(float64(base) * (0.5 + rand.Float64()*0.5))
 }
 
-// RegisterCommands registers bot commands on Telegram platform.
-func (c *TelegramChannel) RegisterCommands(ctx context.Context, defs []commands.Definition) error {
+func commandRegistrationCleanupScopes() []telego.BotCommandScope {
+	return []telego.BotCommandScope{
+		&telego.BotCommandScopeAllPrivateChats{Type: telego.ScopeTypeAllPrivateChats},
+		&telego.BotCommandScopeAllGroupChats{Type: telego.ScopeTypeAllGroupChats},
+		&telego.BotCommandScopeAllChatAdministrators{Type: telego.ScopeTypeAllChatAdministrators},
+	}
+}
+
+func buildBotCommands(defs []commands.Definition) []telego.BotCommand {
 	botCommands := make([]telego.BotCommand, 0, len(defs))
 	for _, def := range defs {
 		if def.Name == "" || def.Description == "" {
@@ -41,8 +48,26 @@ func (c *TelegramChannel) RegisterCommands(ctx context.Context, defs []commands.
 			Description: def.Description,
 		})
 	}
+	return botCommands
+}
 
-	current, err := c.bot.GetMyCommands(ctx, &telego.GetMyCommandsParams{})
+func syncTelegramCommands(
+	ctx context.Context,
+	defs []commands.Definition,
+	getCurrent func(context.Context, *telego.GetMyCommandsParams) ([]telego.BotCommand, error),
+	setCommands func(context.Context, *telego.SetMyCommandsParams) error,
+	deleteCommands func(context.Context, *telego.DeleteMyCommandsParams) error,
+) error {
+	botCommands := buildBotCommands(defs)
+
+	for _, scope := range commandRegistrationCleanupScopes() {
+		if err := deleteCommands(ctx, &telego.DeleteMyCommandsParams{Scope: scope}); err != nil {
+			logger.WarnCF("telegram", "Failed to clear stale Telegram command scope; continuing",
+				map[string]any{"scope": scope.ScopeType(), "error": err.Error()})
+		}
+	}
+
+	current, err := getCurrent(ctx, &telego.GetMyCommandsParams{})
 	if err != nil {
 		// If we can't read current commands, fall through to set them.
 		logger.WarnCF("telegram", "Failed to get current commands, will set unconditionally",
@@ -52,9 +77,20 @@ func (c *TelegramChannel) RegisterCommands(ctx context.Context, defs []commands.
 		return nil
 	}
 
-	return c.bot.SetMyCommands(ctx, &telego.SetMyCommandsParams{
+	return setCommands(ctx, &telego.SetMyCommandsParams{
 		Commands: botCommands,
 	})
+}
+
+// RegisterCommands registers bot commands on Telegram platform.
+func (c *TelegramChannel) RegisterCommands(ctx context.Context, defs []commands.Definition) error {
+	return syncTelegramCommands(
+		ctx,
+		defs,
+		c.bot.GetMyCommands,
+		c.bot.SetMyCommands,
+		c.bot.DeleteMyCommands,
+	)
 }
 
 func (c *TelegramChannel) startCommandRegistration(ctx context.Context, defs []commands.Definition) {

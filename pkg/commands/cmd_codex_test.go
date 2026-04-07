@@ -265,6 +265,128 @@ func TestCodexStatus_ShowsPlannerAndRunState(t *testing.T) {
 	}
 }
 
+func TestCodexPlan_EntersPlanningModeWhenNoApprovalPending(t *testing.T) {
+	var setMode string
+	var cleared bool
+	rt := &Runtime{
+		CodexActive: func() (*CodexSessionInfo, bool) {
+			return &CodexSessionInfo{ID: "a1", Slug: "picoclaw", RepoPath: "/workspace/repos/picoclaw"}, true
+		},
+		SetSessionWorkMode: func(value string) error {
+			setMode = value
+			return nil
+		},
+		GetCodexApprovalPending: func() bool { return false },
+		ClearCodexApprovalPending: func() {
+			cleared = true
+		},
+	}
+	ex := NewExecutor(NewRegistry(BuiltinDefinitions()), rt)
+
+	var reply string
+	res := ex.Execute(context.Background(), Request{
+		Text: "/codex plan",
+		Reply: func(text string) error {
+			reply = text
+			return nil
+		},
+	})
+	if res.Outcome != OutcomeHandled {
+		t.Fatalf("outcome=%v, want=%v", res.Outcome, OutcomeHandled)
+	}
+	if setMode != "codex-plan" {
+		t.Fatalf("setMode=%q, want codex-plan", setMode)
+	}
+	if cleared {
+		t.Fatal("expected pending approval to be preserved when none was pending")
+	}
+	if !strings.Contains(reply, "Codex planning mode enabled") {
+		t.Fatalf("reply=%q, expected planning mode confirmation", reply)
+	}
+}
+
+func TestCodexPlan_PreservesPendingApproval(t *testing.T) {
+	var setMode string
+	var cleared bool
+	rt := &Runtime{
+		CodexActive: func() (*CodexSessionInfo, bool) {
+			return &CodexSessionInfo{ID: "a1", Slug: "picoclaw", RepoPath: "/workspace/repos/picoclaw"}, true
+		},
+		SetSessionWorkMode: func(value string) error {
+			setMode = value
+			return nil
+		},
+		GetCodexApprovalPending: func() bool { return true },
+		ClearCodexApprovalPending: func() {
+			cleared = true
+		},
+	}
+	ex := NewExecutor(NewRegistry(BuiltinDefinitions()), rt)
+
+	var reply string
+	res := ex.Execute(context.Background(), Request{
+		Text: "/codex plan",
+		Reply: func(text string) error {
+			reply = text
+			return nil
+		},
+	})
+	if res.Outcome != OutcomeHandled {
+		t.Fatalf("outcome=%v, want=%v", res.Outcome, OutcomeHandled)
+	}
+	if setMode != "codex-plan" {
+		t.Fatalf("setMode=%q, want codex-plan", setMode)
+	}
+	if cleared {
+		t.Fatal("expected /codex plan not to clear a pending approval")
+	}
+	if !strings.Contains(reply, "A plan is already ready.") {
+		t.Fatalf("reply=%q, expected already-ready guidance", reply)
+	}
+	if !strings.Contains(reply, "/codex replan") {
+		t.Fatalf("reply=%q, expected replan guidance", reply)
+	}
+}
+
+func TestCodexReplan_ClearsPendingApproval(t *testing.T) {
+	var setMode string
+	var cleared bool
+	rt := &Runtime{
+		CodexActive: func() (*CodexSessionInfo, bool) {
+			return &CodexSessionInfo{ID: "a1", Slug: "picoclaw", RepoPath: "/workspace/repos/picoclaw"}, true
+		},
+		SetSessionWorkMode: func(value string) error {
+			setMode = value
+			return nil
+		},
+		ClearCodexApprovalPending: func() {
+			cleared = true
+		},
+	}
+	ex := NewExecutor(NewRegistry(BuiltinDefinitions()), rt)
+
+	var reply string
+	res := ex.Execute(context.Background(), Request{
+		Text: "/codex replan",
+		Reply: func(text string) error {
+			reply = text
+			return nil
+		},
+	})
+	if res.Outcome != OutcomeHandled {
+		t.Fatalf("outcome=%v, want=%v", res.Outcome, OutcomeHandled)
+	}
+	if setMode != "codex-plan" {
+		t.Fatalf("setMode=%q, want codex-plan", setMode)
+	}
+	if !cleared {
+		t.Fatal("expected /codex replan to clear pending approval")
+	}
+	if reply != "Previous pending plan discarded. I’m back in planning mode." {
+		t.Fatalf("reply=%q, want explicit replan confirmation", reply)
+	}
+}
+
 func TestCodexResume_UsesAttach(t *testing.T) {
 	var gotRef string
 	rt := &Runtime{
@@ -394,6 +516,7 @@ func TestCodexPlan_SetsPlanningWorkMode(t *testing.T) {
 			setMode = value
 			return nil
 		},
+		GetCodexApprovalPending: func() bool { return false },
 		ClearCodexApprovalPending: func() {
 			cleared = true
 		},
@@ -414,8 +537,8 @@ func TestCodexPlan_SetsPlanningWorkMode(t *testing.T) {
 	if setMode != "codex-plan" {
 		t.Fatalf("work mode=%q, want=%q", setMode, "codex-plan")
 	}
-	if !cleared {
-		t.Fatal("expected approval state to be cleared")
+	if cleared {
+		t.Fatal("expected /codex plan not to clear approval state")
 	}
 	if !strings.Contains(reply, "planning mode enabled") {
 		t.Fatalf("reply=%q, want planning mode confirmation", reply)
