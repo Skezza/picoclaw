@@ -3,12 +3,134 @@ package telegram
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/mymmrac/telego"
+
 	"github.com/sipeed/picoclaw/pkg/commands"
 )
+
+func TestSyncTelegramCommands_ClearsCleanupScopesBeforeSetting(t *testing.T) {
+	defs := []commands.Definition{
+		{Name: "status", Description: "Show status"},
+		{Name: "codex", Description: "Enter Codex mode"},
+	}
+
+	var deleted []string
+	var setCalls int
+
+	err := syncTelegramCommands(
+		context.Background(),
+		defs,
+		func(context.Context, *telego.GetMyCommandsParams) ([]telego.BotCommand, error) {
+			return nil, errors.New("telegram unavailable")
+		},
+		func(_ context.Context, params *telego.SetMyCommandsParams) error {
+			setCalls++
+			want := []telego.BotCommand{
+				{Command: "status", Description: "Show status"},
+				{Command: "codex", Description: "Enter Codex mode"},
+			}
+			if len(params.Commands) != len(want) {
+				t.Fatalf("expected %d commands, got %d", len(want), len(params.Commands))
+			}
+			for i := range want {
+				if params.Commands[i] != want[i] {
+					t.Fatalf("command %d mismatch: got %+v want %+v", i, params.Commands[i], want[i])
+				}
+			}
+			return nil
+		},
+		func(_ context.Context, params *telego.DeleteMyCommandsParams) error {
+			deleted = append(deleted, params.Scope.ScopeType())
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("syncTelegramCommands returned error: %v", err)
+	}
+
+	wantScopes := []string{
+		telego.ScopeTypeAllPrivateChats,
+		telego.ScopeTypeAllGroupChats,
+		telego.ScopeTypeAllChatAdministrators,
+	}
+	if len(deleted) != len(wantScopes) {
+		t.Fatalf("expected %d cleanup scopes, got %d", len(wantScopes), len(deleted))
+	}
+	for i := range wantScopes {
+		if deleted[i] != wantScopes[i] {
+			t.Fatalf("cleanup scope %d mismatch: got %q want %q", i, deleted[i], wantScopes[i])
+		}
+	}
+	if setCalls != 1 {
+		t.Fatalf("expected exactly one set call, got %d", setCalls)
+	}
+}
+
+func TestSyncTelegramCommands_DeleteFailuresDoNotBlockSet(t *testing.T) {
+	var setCalls int
+	var deleteCalls int
+
+	err := syncTelegramCommands(
+		context.Background(),
+		[]commands.Definition{{Name: "status", Description: "Show status"}},
+		func(context.Context, *telego.GetMyCommandsParams) ([]telego.BotCommand, error) {
+			return nil, errors.New("telegram unavailable")
+		},
+		func(context.Context, *telego.SetMyCommandsParams) error {
+			setCalls++
+			return nil
+		},
+		func(_ context.Context, params *telego.DeleteMyCommandsParams) error {
+			deleteCalls++
+			return fmt.Errorf("cannot delete %s", params.Scope.ScopeType())
+		},
+	)
+	if err != nil {
+		t.Fatalf("syncTelegramCommands returned error: %v", err)
+	}
+	if deleteCalls != len(commandRegistrationCleanupScopes()) {
+		t.Fatalf("expected %d delete attempts, got %d", len(commandRegistrationCleanupScopes()), deleteCalls)
+	}
+	if setCalls != 1 {
+		t.Fatalf("expected exactly one set call, got %d", setCalls)
+	}
+}
+
+func TestSyncTelegramCommands_SkipsSetWhenCommandsAlreadyMatch(t *testing.T) {
+	defs := []commands.Definition{{Name: "status", Description: "Show status"}}
+	var deleted []string
+	var setCalls int
+
+	err := syncTelegramCommands(
+		context.Background(),
+		defs,
+		func(context.Context, *telego.GetMyCommandsParams) ([]telego.BotCommand, error) {
+			return []telego.BotCommand{{Command: "status", Description: "Show status"}}, nil
+		},
+		func(context.Context, *telego.SetMyCommandsParams) error {
+			setCalls++
+			return nil
+		},
+		func(_ context.Context, params *telego.DeleteMyCommandsParams) error {
+			deleted = append(deleted, params.Scope.ScopeType())
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("syncTelegramCommands returned error: %v", err)
+	}
+	if setCalls != 0 {
+		t.Fatalf("expected no set calls, got %d", setCalls)
+	}
+	if len(deleted) != len(commandRegistrationCleanupScopes()) {
+		t.Fatalf("expected %d cleanup scopes, got %d", len(commandRegistrationCleanupScopes()), len(deleted))
+	}
+}
 
 func TestStartCommandRegistration_DoesNotBlock(t *testing.T) {
 	ch := &TelegramChannel{}
