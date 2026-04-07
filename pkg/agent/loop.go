@@ -3236,9 +3236,6 @@ func normalizeCodexPlanningReply(content string) (string, bool) {
 
 func normalizeCodexPlanningReplyWithState(content string, approvalPending bool) (string, bool, bool) {
 	armed := codexApprovalReady(content)
-	if !armed {
-		armed = codexPlanningImplicitApprovalReady(content)
-	}
 	content = strings.ReplaceAll(content, codexApprovalReadyMarker, "")
 	content = strings.TrimSpace(content)
 	if !armed {
@@ -3249,36 +3246,6 @@ func normalizeCodexPlanningReplyWithState(content string, approvalPending bool) 
 	}
 	content += "\n\nReply `proceed` to execute this plan."
 	return content, true, false
-}
-
-func codexPlanningImplicitApprovalReady(content string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(content))
-	if normalized == "" {
-		return false
-	}
-	if strings.Contains(normalized, "?") {
-		return false
-	}
-	if !strings.Contains(normalized, "plan") {
-		return false
-	}
-
-	readyPhrases := []string{
-		"i can proceed",
-		"ready to proceed",
-		"ready to execute",
-		"ready to implement",
-		"i can implement next",
-		"i can make the change next",
-		"i can proceed with the change next",
-		"if you want, i can proceed",
-	}
-	for _, phrase := range readyPhrases {
-		if strings.Contains(normalized, phrase) {
-			return true
-		}
-	}
-	return false
 }
 
 func injectWorkModePrompt(

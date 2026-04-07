@@ -405,7 +405,7 @@ func TestProcessMessage_CodexPlanModeArmsApprovalWhenMarkerPresent(t *testing.T)
 	}
 }
 
-func TestProcessMessage_CodexPlanModeArmsApprovalWhenResponseClearlyOffersProceed(t *testing.T) {
+func TestProcessMessage_CodexPlanModeDoesNotArmApprovalWithoutExplicitMarker(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := &config.Config{
 		Agents: config.AgentsConfig{
@@ -432,11 +432,25 @@ func TestProcessMessage_CodexPlanModeArmsApprovalWhenResponseClearlyOffersProcee
 	if err != nil {
 		t.Fatalf("processMessage() error = %v", err)
 	}
-	if !strings.Contains(response, "Reply `proceed` to execute this plan.") {
-		t.Fatalf("response=%q, want proceed instruction", response)
+	if strings.Contains(response, "Reply `proceed` to execute this plan.") {
+		t.Fatalf("response=%q, did not want proceed instruction without explicit marker", response)
 	}
-	if !al.hasCodexApprovalPending(sessionKey) {
-		t.Fatal("expected approval to be armed")
+	if al.hasCodexApprovalPending(sessionKey) {
+		t.Fatal("did not expect approval to be armed without explicit marker")
+	}
+}
+
+func TestNormalizeCodexPlanningReplyWithState_RequiresExplicitMarker(t *testing.T) {
+	content := "Plan:\n1. Inspect the repo\n2. Summarize findings\n\nIf you want, I can proceed with the change next."
+	normalized, armed, preserve := normalizeCodexPlanningReplyWithState(content, false)
+	if armed {
+		t.Fatal("did not expect approval to arm without explicit marker")
+	}
+	if preserve {
+		t.Fatal("did not expect preservePending without existing approval")
+	}
+	if !strings.Contains(normalized, "If you want, I can proceed with the change next.") {
+		t.Fatalf("normalized=%q, want original content preserved", normalized)
 	}
 }
 
