@@ -168,16 +168,16 @@ func (t *MCPTool) Parameters() map[string]any {
 
 	// Handle nil schema
 	if schema == nil {
-		return map[string]any{
+		return normalizeMCPParametersSchema(map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},
 			"required":   []string{},
-		}
+		})
 	}
 
 	// Try direct conversion first (fast path)
 	if schemaMap, ok := schema.(map[string]any); ok {
-		return schemaMap
+		return normalizeMCPParametersSchema(schemaMap)
 	}
 
 	// Handle json.RawMessage and []byte - unmarshal directly
@@ -191,14 +191,14 @@ func (t *MCPTool) Parameters() map[string]any {
 	if jsonData != nil {
 		var result map[string]any
 		if err := json.Unmarshal(jsonData, &result); err == nil {
-			return result
+			return normalizeMCPParametersSchema(result)
 		}
 		// Fallback on error
-		return map[string]any{
+		return normalizeMCPParametersSchema(map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},
 			"required":   []string{},
-		}
+		})
 	}
 
 	// For other types (structs, etc.), convert via JSON marshal/unmarshal
@@ -206,16 +206,28 @@ func (t *MCPTool) Parameters() map[string]any {
 	jsonData, err = json.Marshal(schema)
 	if err != nil {
 		// Fallback to empty schema if marshaling fails
-		return map[string]any{
+		return normalizeMCPParametersSchema(map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},
 			"required":   []string{},
-		}
+		})
 	}
 
 	var result map[string]any
 	if err := json.Unmarshal(jsonData, &result); err != nil {
 		// Fallback to empty schema if unmarshaling fails
+		return normalizeMCPParametersSchema(map[string]any{
+			"type":       "object",
+			"properties": map[string]any{},
+			"required":   []string{},
+		})
+	}
+
+	return normalizeMCPParametersSchema(result)
+}
+
+func normalizeMCPParametersSchema(schema map[string]any) map[string]any {
+	if schema == nil {
 		return map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},
@@ -223,7 +235,13 @@ func (t *MCPTool) Parameters() map[string]any {
 		}
 	}
 
-	return result
+	if schema["type"] == "object" {
+		if _, ok := schema["properties"]; !ok {
+			schema["properties"] = map[string]any{}
+		}
+	}
+
+	return schema
 }
 
 // Execute executes the MCP tool

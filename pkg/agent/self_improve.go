@@ -1,0 +1,789 @@
+package agent
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/sipeed/picoclaw/pkg/config"
+)
+
+const (
+	selfImproveDefaultHealthURL = "http://127.0.0.1:18790/ready"
+	selfImproveValidateTimeout  = 12 * time.Minute
+)
+
+type selfImproveChange struct {
+	Status    string
+	Path      string
+	OldPath   string
+	Committed bool
+}
+
+func (al *AgentLoop) selfImproveTargets(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	targets := make([]string, 0, len(cfg.SelfImprove.Targets))
+	for name, target := range cfg.SelfImprove.Targets {
+		if !target.Enabled {
+			continue
+		}
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		targets = append(targets, name)
+	}
+	sort.Strings(targets)
+	return targets
+}
+
+func (al *AgentLoop) ensureSelfImproveSession(scopeKey string, cfg *config.Config, agent *AgentInstance) (*codexSessionRecord, error) {
+	if al == nil || al.codexStore == nil {
+		return nil, fmt.Errorf("self-improve sessions are not initialized")
+	}
+	if cfg == nil || !cfg.SelfImprove.Enabled {
+		return nil, fmt.Errorf("self-improve is disabled")
+	}
+	repo := strings.TrimSpace(cfg.SelfImprove.Repo)
+	if repo == "" {
+		return nil, fmt.Errorf("self-improve repo is not configured")
+	}
+
+	executorModel := strings.TrimSpace(al.findCodexModelName(cfg))
+	if executorModel == "" {
+		return nil, fmt.Errorf("no codex-cli model configured in model_list")
+	}
+	plannerModel := strings.TrimSpace(al.findCodexPlannerModelName(cfg))
+	if plannerModel == "" {
+		return nil, fmt.Errorf("no planner model configured for /codex")
+	}
+
+	if agent != nil {
+		if _, _, _, err := al.resolveModelSelection(cfg, agent, executorModel, ""); err != nil {
+			return nil, err
+		}
+		if _, _, _, err := al.resolveModelSelection(cfg, agent, plannerModel, ""); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := exec.LookPath("codex"); err != nil {
+		return nil, fmt.Errorf("codex binary not found on host; install Codex CLI first")
+	}
+
+	slug, source, err := selfImproveRepoSpec(cfg.SelfImprove)
+	if err != nil {
+		return nil, err
+	}
+
+	rec, err := al.codexStore.CreateOrActivate(scopeKey, slug, source)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureGitRemoteForSelfImprove(rec.RepoPath, cfg.SelfImprove); err != nil {
+		return nil, err
+	}
+	if err := syncSelfImproveRepo(rec.RepoPath); err != nil {
+		return nil, err
+	}
+
+	_ = al.codexStore.SetSessionRuntime(scopeKey, codexSessionRuntimeState{
+		PlannerModel:  plannerModel,
+		ExecutorModel: executorModel,
+		WorkMode:      "codex-plan",
+		LastRunID:     strings.TrimSpace(rec.LastRunID),
+	})
+	al.setSessionModelOverride(scopeKey, plannerModel)
+	al.clearPendingModelOverride(scopeKey)
+	al.clearCodexApprovalPending(scopeKey)
+	al.setSessionWorkMode(scopeKey, "codex-plan")
+
+	return rec, nil
+}
+
+func selfImproveRepoSpec(cfg config.SelfImproveConfig) (slug, source string, err error) {
+	repo := strings.TrimSpace(cfg.Repo)
+	if repo == "" {
+		return "", "", fmt.Errorf("self-improve repo is not configured")
+	}
+
+	slug, err = sanitizeCodexSlug(repo)
+	if err != nil {
+		return "", "", err
+	}
+	if cfg.SSHPreferred && strings.Count(repo, "/") == 1 && !strings.ContainsAny(repo, " \t:@") {
+		return slug, fmt.Sprintf("git@github.com:%s.git", repo), nil
+	}
+	source, err = normalizeRepoSource(repo)
+	if err != nil {
+		return "", "", err
+	}
+	return slug, source, nil
+}
+
+func (al *AgentLoop) selfImproveStatus(scopeKey string, cfg *config.Config, agent *AgentInstance) (string, error) {
+	if cfg == nil || !cfg.SelfImprove.Enabled {
+		return "", fmt.Errorf("self-improve is disabled")
+	}
+	rec, err := al.ensureSelfImproveSession(scopeKey, cfg, agent)
+	if err != nil {
+		return "", err
+	}
+
+	lines := []string{
+		"Self-improve is configured.",
+		fmt.Sprintf("Repo: %s", strings.TrimSpace(cfg.SelfImprove.Repo)),
+		fmt.Sprintf("Session: %s", rec.ID),
+		fmt.Sprintf("Path: %s", rec.RepoPath),
+	}
+	targets := al.selfImproveTargets(cfg)
+	if len(targets) > 0 {
+		lines = append(lines, "Targets: "+strings.Join(targets, ", "))
+	}
+
+	runs := al.codexStore.ListRuns(scopeKey)
+	if len(runs) == 0 {
+		lines = append(lines, "Latest run: none")
+		return strings.Join(lines, "\n"), nil
+	}
+	run := runs[0]
+	lines = append(lines,
+		fmt.Sprintf("Latest run: %s", run.ID),
+		fmt.Sprintf("Run status: %s", run.Status),
+	)
+	if strings.TrimSpace(run.PublishedBranch) != "" {
+		lines = append(lines, fmt.Sprintf("Published branch: %s", run.PublishedBranch))
+	}
+	if strings.TrimSpace(run.PublishedSHA) != "" {
+		lines = append(lines, fmt.Sprintf("Published sha: %s", run.PublishedSHA))
+	}
+	if strings.TrimSpace(run.ShippedTarget) != "" {
+		lines = append(lines, fmt.Sprintf("Shipped target: %s", run.ShippedTarget))
+	}
+	if strings.TrimSpace(run.ShippedDeployBranch) != "" {
+		lines = append(lines, fmt.Sprintf("Deploy branch: %s", run.ShippedDeployBranch))
+	}
+	if strings.TrimSpace(run.ShippedSHA) != "" {
+		lines = append(lines, fmt.Sprintf("Shipped sha: %s", run.ShippedSHA))
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+func (al *AgentLoop) selfImproveShip(scopeKey string, cfg *config.Config, agent *AgentInstance, targetName string) (string, error) {
+	if cfg == nil || !cfg.SelfImprove.Enabled {
+		return "", fmt.Errorf("self-improve is disabled")
+	}
+	rec, err := al.ensureSelfImproveSession(scopeKey, cfg, agent)
+	if err != nil {
+		return "", err
+	}
+
+	targetName = strings.TrimSpace(targetName)
+	target, ok := cfg.SelfImprove.Targets[targetName]
+	if !ok || !target.Enabled {
+		return "", fmt.Errorf("unknown self-improve target %q", targetName)
+	}
+	deployBranch := strings.TrimSpace(target.DeployBranch)
+	if deployBranch == "" {
+		return "", fmt.Errorf("self-improve target %q does not define a deploy_branch", targetName)
+	}
+	if err := validateSelfImproveDeployBranch(deployBranch); err != nil {
+		return "", err
+	}
+
+	run, err := al.latestShippableSelfImproveRun(scopeKey)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(run.WorktreePath) == "" || !isGitRepo(run.WorktreePath) {
+		return "", fmt.Errorf("latest successful self-improve run does not have a valid worktree")
+	}
+
+	if err := ensureGitRemoteForSelfImprove(rec.RepoPath, cfg.SelfImprove); err != nil {
+		return "", err
+	}
+	if err := validateSelfImproveWorktree(run.WorktreePath); err != nil {
+		return "", err
+	}
+
+	if staged, err := stageSelfImproveWorkingChanges(run.WorktreePath); err != nil {
+		return "", err
+	} else if staged {
+		msg := fmt.Sprintf("self-improve: publish %s for %s", run.ID, targetName)
+		if _, err := gitOutput(run.WorktreePath, "commit", "-m", msg); err != nil {
+			return "", err
+		}
+	}
+
+	sha, err := gitOutput(run.WorktreePath, "rev-parse", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	sha = strings.TrimSpace(sha)
+	if sha == "" {
+		return "", fmt.Errorf("failed to resolve published commit sha")
+	}
+
+	branchPrefix := strings.Trim(strings.TrimSpace(cfg.SelfImprove.PublishBranchPrefix), "/")
+	if branchPrefix == "" {
+		branchPrefix = "self-improve"
+	}
+	publishBranch := fmt.Sprintf("%s/%s/%s", branchPrefix, rec.Slug, run.ID)
+	if _, err := gitOutput(run.WorktreePath, "push", "origin", fmt.Sprintf("HEAD:refs/heads/%s", publishBranch)); err != nil {
+		return "", err
+	}
+	if _, err := gitOutput(run.WorktreePath, "push", "origin", fmt.Sprintf("%s:refs/heads/%s", sha, deployBranch)); err != nil {
+		return "", fmt.Errorf("failed to fast-forward deploy branch %s: %w", deployBranch, err)
+	}
+
+	if err := al.codexStore.UpdateRun(run.ID, func(rec *codexRunRecord) {
+		rec.PublishedBranch = publishBranch
+		rec.PublishedSHA = sha
+		rec.ShippedTarget = targetName
+		rec.ShippedDeployBranch = deployBranch
+		rec.ShippedSHA = sha
+	}); err != nil {
+		return "", err
+	}
+
+	return strings.Join([]string{
+		fmt.Sprintf("Self-improve publish complete for target %s.", targetName),
+		fmt.Sprintf("Repo: %s", rec.Slug),
+		fmt.Sprintf("Run: %s", run.ID),
+		fmt.Sprintf("Published branch: %s", publishBranch),
+		fmt.Sprintf("Deploy branch: %s", deployBranch),
+		fmt.Sprintf("Commit: %s", sha),
+	}, "\n"), nil
+}
+
+func (al *AgentLoop) latestShippableSelfImproveRun(scopeKey string) (*codexRunRecord, error) {
+	runs := al.codexStore.ListRuns(scopeKey)
+	for i := range runs {
+		run := runs[i]
+		if strings.EqualFold(strings.TrimSpace(run.Mode), "deploy") {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(run.Status), codexRunStatusSucceeded) {
+			return nil, fmt.Errorf("latest self-improve run %s is %s; only the latest successful run can be shipped", run.ID, strings.TrimSpace(run.Status))
+		}
+		return &run, nil
+	}
+	return nil, fmt.Errorf("no successful self-improve run is ready to ship yet")
+}
+
+func ensureGitRemoteForSelfImprove(repoPath string, cfg config.SelfImproveConfig) error {
+	if !cfg.SSHPreferred {
+		return nil
+	}
+	repo := strings.TrimSpace(cfg.Repo)
+	if strings.Count(repo, "/") != 1 || strings.ContainsAny(repo, " \t:@") {
+		return nil
+	}
+	expected := fmt.Sprintf("git@github.com:%s.git", repo)
+	current, err := gitOutput(repoPath, "remote", "get-url", "origin")
+	if err != nil {
+		return err
+	}
+	current = strings.TrimSpace(current)
+	if current != "" {
+		return nil
+	}
+	_, err = gitOutput(repoPath, "remote", "set-url", "origin", expected)
+	return err
+}
+
+func syncSelfImproveRepo(repoPath string) error {
+	if !isGitRepo(repoPath) {
+		return fmt.Errorf("self-improve repo path is not a git repository: %s", repoPath)
+	}
+	if _, err := gitOutput(repoPath, "fetch", "--prune", "origin"); err != nil {
+		return err
+	}
+
+	ref, err := gitOutput(repoPath, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+	if err != nil {
+		ref = "origin/main"
+	}
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		ref = "origin/main"
+	}
+	branch := strings.TrimPrefix(ref, "origin/")
+	if branch == "" || branch == ref {
+		branch = "main"
+		ref = "origin/" + branch
+	}
+	_, err = gitOutput(repoPath, "checkout", "-B", branch, ref)
+	return err
+}
+
+func validateSelfImproveWorktree(worktree string) error {
+	changes, err := collectSelfImproveChanges(worktree)
+	if err != nil {
+		return err
+	}
+	if err := validateSelfImproveArchitecturePolicy(worktree, changes); err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), selfImproveValidateTimeout)
+	defer cancel()
+
+	tmpDir := filepath.Join(worktree, ".tmp", "self-improve")
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		return err
+	}
+	cacheDir := filepath.Join(tmpDir, "cache")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return err
+	}
+
+	goBin, err := resolveSelfImproveBinary("go")
+	if err != nil {
+		return err
+	}
+	baseEnv := selfImproveCommandEnv()
+
+	steps := [][]string{
+		{goBin, "test", "./pkg/agent", "./pkg/config", "./pkg/tools"},
+		{goBin, "generate", "./..."},
+		{goBin, "build", "-v", "-tags", "goolm,stdjson", "-o", filepath.Join(tmpDir, "picoclaw"), "./cmd/picoclaw"},
+		{goBin, "build", "-v", "-tags", "goolm,stdjson", "-o", filepath.Join(tmpDir, "picoclaw-launcher"), "./web/backend"},
+	}
+	mcpBinaries, err := listSelfImproveMCPBinaries(worktree)
+	if err != nil {
+		return err
+	}
+	for _, name := range mcpBinaries {
+		steps = append(steps, []string{goBin, "build", "-v", "-tags", "goolm,stdjson", "-o", filepath.Join(tmpDir, name), "./cmd/" + name})
+	}
+	for _, step := range steps {
+		cmd := exec.CommandContext(ctx, step[0], step[1:]...)
+		cmd.Dir = worktree
+		cmd.Env = append(
+			baseEnv,
+			"GIT_TERMINAL_PROMPT=0",
+			"CGO_ENABLED=0",
+			"TMPDIR="+tmpDir,
+			"GOCACHE="+filepath.Join(cacheDir, "go-build"),
+			"GOMODCACHE="+filepath.Join(cacheDir, "pkg", "mod"),
+		)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("%s failed: %w: %s", strings.Join(step, " "), err, strings.TrimSpace(string(output)))
+		}
+	}
+	return nil
+}
+
+func stageSelfImproveWorkingChanges(worktree string) (bool, error) {
+	changes, err := collectSelfImproveWorkingChanges(worktree)
+	if err != nil {
+		return false, err
+	}
+	paths, err := selfImproveStageablePaths(changes)
+	if err != nil {
+		return false, err
+	}
+	if len(paths) == 0 {
+		return false, nil
+	}
+	args := append([]string{"add", "-A", "--"}, paths...)
+	if _, err := gitOutput(worktree, args...); err != nil {
+		return false, err
+	}
+	hasChanges, err := gitHasSelfImproveStagedChanges(worktree)
+	if err != nil {
+		return false, err
+	}
+	if !hasChanges {
+		return false, nil
+	}
+	return true, nil
+}
+
+func validateSelfImproveDeployBranch(branch string) error {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return fmt.Errorf("deploy branch is required")
+	}
+	if branch == "main" || branch == "master" {
+		return fmt.Errorf("self-improve deploy branch %q is unsafe; use a dedicated deploy/* branch", branch)
+	}
+	if !strings.HasPrefix(branch, "deploy/") {
+		return fmt.Errorf("self-improve deploy branch %q is unsafe; deploy targets must use a deploy/* branch", branch)
+	}
+	return nil
+}
+
+func listSelfImproveMCPBinaries(worktree string) ([]string, error) {
+	cmdDir := filepath.Join(worktree, "cmd")
+	entries, err := os.ReadDir(cmdDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var names []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := strings.TrimSpace(entry.Name())
+		if strings.HasPrefix(name, "picoclaw-mcp-") {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func collectSelfImproveWorkingChanges(worktree string) ([]selfImproveChange, error) {
+	workingOut, err := gitOutput(worktree, "status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return nil, err
+	}
+	return parseStatusPorcelainChanges(workingOut), nil
+}
+
+func collectSelfImproveChanges(worktree string) ([]selfImproveChange, error) {
+	baseRef, err := selfImproveDefaultBranchRef(worktree)
+	if err != nil {
+		return nil, err
+	}
+	mergeBase, err := gitOutput(worktree, "merge-base", "HEAD", baseRef)
+	if err != nil {
+		return nil, err
+	}
+	mergeBase = strings.TrimSpace(mergeBase)
+	if mergeBase == "" {
+		return nil, fmt.Errorf("failed to determine merge base for self-improve worktree")
+	}
+
+	seen := map[string]selfImproveChange{}
+	add := func(change selfImproveChange) {
+		change.Path = filepath.ToSlash(strings.TrimSpace(change.Path))
+		change.OldPath = filepath.ToSlash(strings.TrimSpace(change.OldPath))
+		if change.Path == "" {
+			return
+		}
+		key := change.Status + "|" + change.Path + "|" + change.OldPath
+		seen[key] = change
+	}
+
+	if committedOut, err := gitOutput(worktree, "diff", "--name-status", mergeBase+"..HEAD"); err != nil {
+		return nil, err
+	} else {
+		for _, change := range parseNameStatusChanges(committedOut, true) {
+			add(change)
+		}
+	}
+	if workingOut, err := gitOutput(worktree, "status", "--porcelain", "--untracked-files=all"); err != nil {
+		return nil, err
+	} else {
+		for _, change := range parseStatusPorcelainChanges(workingOut) {
+			add(change)
+		}
+	}
+
+	changes := make([]selfImproveChange, 0, len(seen))
+	for _, change := range seen {
+		changes = append(changes, change)
+	}
+	sort.Slice(changes, func(i, j int) bool {
+		if changes[i].Path == changes[j].Path {
+			if changes[i].Status == changes[j].Status {
+				return changes[i].OldPath < changes[j].OldPath
+			}
+			return changes[i].Status < changes[j].Status
+		}
+		return changes[i].Path < changes[j].Path
+	})
+	return changes, nil
+}
+
+func selfImproveStageablePaths(changes []selfImproveChange) ([]string, error) {
+	var blocked []string
+	seen := map[string]struct{}{}
+	var paths []string
+	for _, change := range changes {
+		for _, raw := range []string{change.OldPath, change.Path} {
+			path := filepath.ToSlash(strings.TrimSpace(raw))
+			if path == "" {
+				continue
+			}
+			if selfImproveIgnoredWorkingPath(path) {
+				continue
+			}
+			if selfImproveBlockedWorkingPath(path) {
+				blocked = append(blocked, path)
+				continue
+			}
+			if _, ok := seen[path]; ok {
+				continue
+			}
+			seen[path] = struct{}{}
+			paths = append(paths, path)
+		}
+	}
+	if len(blocked) > 0 {
+		sort.Strings(blocked)
+		return nil, fmt.Errorf("self-improve ship refused to publish suspicious working-tree paths: %s", strings.Join(blocked, ", "))
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+func selfImproveIgnoredWorkingPath(path string) bool {
+	path = filepath.ToSlash(strings.TrimSpace(path))
+	if path == "" {
+		return true
+	}
+	for _, prefix := range []string{
+		".tmp/",
+		"tmp/",
+	} {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func selfImproveBlockedWorkingPath(path string) bool {
+	path = strings.ToLower(filepath.ToSlash(strings.TrimSpace(path)))
+	if path == "" {
+		return false
+	}
+	base := filepath.Base(path)
+	switch {
+	case base == ".ds_store",
+		base == ".env",
+		strings.HasPrefix(base, ".env."),
+		strings.HasSuffix(base, ".log"),
+		strings.HasSuffix(base, ".tmp"),
+		strings.HasSuffix(base, ".swp"),
+		strings.HasSuffix(base, ".bak"),
+		strings.HasSuffix(base, ".sqlite"),
+		strings.HasSuffix(base, ".db"),
+		strings.HasSuffix(base, ".pem"),
+		strings.HasSuffix(base, ".key"),
+		strings.Contains(base, "secret"),
+		strings.Contains(base, "token"):
+		return true
+	}
+	for _, prefix := range []string{
+		"secrets/",
+		".secrets/",
+	} {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func gitHasSelfImproveStagedChanges(worktree string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--quiet")
+	cmd.Dir = worktree
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return true, nil
+		}
+		return false, fmt.Errorf("git diff --cached --quiet failed: %w", err)
+	}
+	return false, nil
+}
+
+func selfImproveDefaultBranchRef(worktree string) (string, error) {
+	ref, err := gitOutput(worktree, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+	if err == nil {
+		ref = strings.TrimSpace(ref)
+		if ref != "" {
+			return ref, nil
+		}
+	}
+	return "origin/main", nil
+}
+
+func parseNameStatusChanges(raw string, committed bool) []selfImproveChange {
+	lines := strings.Split(strings.TrimSpace(raw), "\n")
+	changes := make([]selfImproveChange, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) < 2 {
+			continue
+		}
+		status := strings.TrimSpace(fields[0])
+		change := selfImproveChange{
+			Status:    status,
+			Committed: committed,
+		}
+		if strings.HasPrefix(status, "R") || strings.HasPrefix(status, "C") {
+			if len(fields) < 3 {
+				continue
+			}
+			change.OldPath = fields[1]
+			change.Path = fields[2]
+		} else {
+			change.Path = fields[1]
+		}
+		changes = append(changes, change)
+	}
+	return changes
+}
+
+func parseStatusPorcelainChanges(raw string) []selfImproveChange {
+	lines := strings.Split(strings.TrimSpace(raw), "\n")
+	changes := make([]selfImproveChange, 0, len(lines))
+	for _, line := range lines {
+		if len(line) < 4 {
+			continue
+		}
+		status := strings.TrimSpace(line[:2])
+		pathPart := strings.TrimSpace(line[3:])
+		change := selfImproveChange{Status: status}
+		if strings.Contains(pathPart, " -> ") && (strings.Contains(status, "R") || strings.Contains(status, "C")) {
+			parts := strings.SplitN(pathPart, " -> ", 2)
+			change.OldPath = parts[0]
+			change.Path = parts[1]
+		} else {
+			change.Path = pathPart
+		}
+		changes = append(changes, change)
+	}
+	return changes
+}
+
+func validateSelfImproveArchitecturePolicy(worktree string, changes []selfImproveChange) error {
+	var violations []string
+	mcpDirs := map[string]struct{}{}
+	for _, change := range changes {
+		path := filepath.ToSlash(strings.TrimSpace(change.Path))
+		if path == "" || !selfImproveAddsPath(change.Status) {
+			continue
+		}
+		if dir, ok := selfImproveMCPDir(path); ok {
+			mcpDirs[dir] = struct{}{}
+		}
+		if !strings.HasPrefix(path, "pkg/tools/") || strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		violations = append(violations, path)
+	}
+	for dir := range mcpDirs {
+		if _, err := os.Stat(filepath.Join(worktree, dir, "main.go")); err != nil {
+			violations = append(violations, dir+"/main.go (missing)")
+		}
+	}
+	if len(violations) == 0 {
+		return nil
+	}
+	sort.Strings(violations)
+	return fmt.Errorf(
+		"self-improve ship policy violation: new non-test files under pkg/tools are not allowed for external integrations (%s). External integrations must be MCPs with entrypoints under cmd/picoclaw-mcp-*",
+		strings.Join(violations, ", "),
+	)
+}
+
+func selfImproveMCPDir(path string) (string, bool) {
+	path = filepath.ToSlash(strings.TrimSpace(path))
+	if !strings.HasPrefix(path, "cmd/picoclaw-mcp-") {
+		return "", false
+	}
+	parts := strings.Split(path, "/")
+	if len(parts) < 2 {
+		return "", false
+	}
+	return strings.Join(parts[:2], "/"), true
+}
+
+func selfImproveAddsPath(status string) bool {
+	status = strings.TrimSpace(status)
+	if status == "" {
+		return false
+	}
+	if status == "??" {
+		return true
+	}
+	return strings.HasPrefix(status, "A") || strings.HasPrefix(status, "R") || strings.HasPrefix(status, "C")
+}
+
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+func resolveSelfImproveBinary(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", fmt.Errorf("binary name is required")
+	}
+	if path, err := exec.LookPath(name); err == nil && strings.TrimSpace(path) != "" {
+		return path, nil
+	}
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		candidate := filepath.Join(home, ".local", "bin", name)
+		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("%s binary not found in PATH or ~/.local/bin", name)
+}
+
+func selfImproveCommandEnv() []string {
+	env := append([]string(nil), os.Environ()...)
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		localBin := filepath.Join(home, ".local", "bin")
+		hasPath := false
+		for i, entry := range env {
+			if !strings.HasPrefix(entry, "PATH=") {
+				continue
+			}
+			hasPath = true
+			current := strings.TrimPrefix(entry, "PATH=")
+			if current == "" {
+				env[i] = "PATH=" + localBin
+			} else if !strings.Contains(current, localBin) {
+				env[i] = "PATH=" + localBin + string(os.PathListSeparator) + current
+			}
+			break
+		}
+		if !hasPath {
+			env = append(env, "PATH="+localBin)
+		}
+	}
+	return env
+}
+
+func gitOutput(dir string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	output, err := cmd.CombinedOutput()
+	text := strings.TrimSpace(string(output))
+	if err != nil {
+		if text == "" {
+			text = err.Error()
+		}
+		return "", fmt.Errorf("git %s failed: %s", strings.Join(args, " "), text)
+	}
+	return text, nil
+}

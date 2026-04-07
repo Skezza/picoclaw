@@ -3,13 +3,51 @@
     "defaults": {
       "workspace": "~/.picoclaw/workspace",
       "restrict_to_workspace": true,
-      "model_name": "gpt-5.4",
+      "model_name": "gpt-5-mini",
+      "model_fallbacks": ["gpt-5.4-mini"],
       "max_tokens": 8192,
       "context_window": 131072,
       "temperature": 0.7,
       "max_tool_iterations": 20,
       "summarize_message_threshold": 20,
       "summarize_token_percent": 75,
+      "routing": {
+        "enabled": true,
+        "free_tier": "free",
+        "paid_tier": "heavy",
+        "tiers": [
+          {
+            "name": "fast",
+            "max_score": 0.2,
+            "model": {
+              "primary": "gpt-5.4-nano",
+              "fallbacks": ["gpt-5-nano"]
+            }
+          },
+          {
+            "name": "tools",
+            "model": {
+              "primary": "gpt-5.4-mini",
+              "fallbacks": ["gpt-5-mini"]
+            }
+          },
+          {
+            "name": "heavy",
+            "model": {
+              "primary": "gpt-5-mini",
+              "fallbacks": ["gpt-5.4-mini"]
+            }
+          },
+          {
+            "name": "free",
+            "max_score": -1,
+            "model": {
+              "primary": "openrouter-free-qwen",
+              "fallbacks": ["openrouter-free-oss", "openrouter-free-step"]
+            }
+          }
+        ]
+      },
       "split_on_marker": false,
       "tool_feedback": {
         "enabled": false,
@@ -23,6 +61,48 @@
       "model": "openai/gpt-5.4",
       "api_key": "sk-your-openai-key",
       "api_base": "https://api.openai.com/v1"
+    },
+    {
+      "model_name": "gpt-5.4-mini",
+      "model": "openai/gpt-5.4-mini",
+      "api_key": "sk-your-openai-key",
+      "api_base": "https://api.openai.com/v1"
+    },
+    {
+      "model_name": "gpt-5-mini",
+      "model": "openai/gpt-5-mini",
+      "api_key": "sk-your-openai-key",
+      "api_base": "https://api.openai.com/v1"
+    },
+    {
+      "model_name": "gpt-5.4-nano",
+      "model": "openai/gpt-5.4-nano",
+      "api_key": "sk-your-openai-key",
+      "api_base": "https://api.openai.com/v1"
+    },
+    {
+      "model_name": "gpt-5-nano",
+      "model": "openai/gpt-5-nano",
+      "api_key": "sk-your-openai-key",
+      "api_base": "https://api.openai.com/v1"
+    },
+    {
+      "model_name": "openrouter-free-qwen",
+      "model": "openrouter/qwen/qwen3-next-80b-a3b-instruct:free",
+      "api_key": "sk-or-your-openrouter-key",
+      "api_base": "https://openrouter.ai/api/v1"
+    },
+    {
+      "model_name": "openrouter-free-oss",
+      "model": "openrouter/openai/gpt-oss-20b:free",
+      "api_key": "sk-or-your-openrouter-key",
+      "api_base": "https://openrouter.ai/api/v1"
+    },
+    {
+      "model_name": "openrouter-free-step",
+      "model": "openrouter/stepfun/step-3.5-flash:free",
+      "api_key": "sk-or-your-openrouter-key",
+      "api_base": "https://openrouter.ai/api/v1"
     },
     {
       "model_name": "claude-sonnet-4.6",
@@ -329,10 +409,11 @@
         },
         "github": {
           "enabled": false,
-          "command": "npx",
-          "args": ["-y", "@modelcontextprotocol/server-github"],
-          "env": {
-            "GITHUB_PERSONAL_ACCESS_TOKEN": "YOUR_GITHUB_TOKEN"
+          "type": "http",
+          "url": "https://api.githubcopilot.com/mcp/",
+          "headers": {
+            "Authorization": "Bearer ${GITHUB_MCP_PAT}",
+            "X-MCP-Toolsets": "repos,issues,pull_requests"
           }
         },
         "brave-search": {
@@ -359,6 +440,35 @@
           "env": {
             "SLACK_BOT_TOKEN": "YOUR_SLACK_BOT_TOKEN",
             "SLACK_TEAM_ID": "YOUR_SLACK_TEAM_ID"
+          }
+        },
+        "outlook": {
+          "enabled": false,
+          "deferred": true,
+          "command": "npx",
+          "args": ["mcp_outlook"],
+          "env_file": "/absolute/path/to/outlook.env"
+        },
+        "google-workspace": {
+          "enabled": false,
+          "deferred": true,
+          "command": "google-mcp-server",
+          "env_file": "/absolute/path/to/google-workspace.env"
+        },
+        "ebay": {
+          "enabled": false,
+          "deferred": true,
+          "command": "npx",
+          "args": ["-y", "ebay-mcp"],
+          "env_file": "/absolute/path/to/ebay.env"
+        },
+        "home_assistant": {
+          "enabled": false,
+          "command": "/home/joe/.local/bin/picoclaw-mcp-homeassistant",
+          "env": {
+            "HOME_ASSISTANT_BASE_URL": "http://127.0.0.1:8123",
+            "HOME_ASSISTANT_TOKEN": "",
+            "HOME_ASSISTANT_TIMEOUT_SECONDS": "15"
           }
         }
       }
@@ -405,6 +515,23 @@
     "edit_file": {
       "enabled": true
     },
+    "git": {
+      "enabled": true,
+      "timeout_seconds": 60
+    },
+    "github": {
+      "enabled": false,
+      "token": "",
+      "base_url": "https://api.github.com",
+      "proxy": "",
+      "timeout_seconds": 20
+    },
+    "home_assistant": {
+      "enabled": false,
+      "base_url": "http://127.0.0.1:8123",
+      "token": "",
+      "timeout_seconds": 15
+    },
     "find_skills": {
       "enabled": true
     },
@@ -441,6 +568,23 @@
     },
     "write_file": {
       "enabled": true
+    }
+  },
+  "self_improve": {
+    "enabled": false,
+    "repo": "",
+    "ssh_preferred": false,
+    "publish_branch_prefix": "self-improve",
+    "targets": {
+      "quanta": {
+        "enabled": false,
+        "deploy_branch": "deploy/quanta",
+        "service_name": "picoclaw.service",
+        "health_url": "http://127.0.0.1:18790/ready",
+        "allow_health_fallback": false,
+        "poll_interval_seconds": 60,
+        "install_root": "/home/joe/.local/lib/picoclaw"
+      }
     }
   },
   "heartbeat": {

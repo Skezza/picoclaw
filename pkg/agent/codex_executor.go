@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -179,10 +178,6 @@ func (al *AgentLoop) codexRunTail(sessionKey, runID string, lines int) (string, 
 	if al == nil || al.codexStore == nil {
 		return "", fmt.Errorf("codex runs are not initialized")
 	}
-	activeSessionID := ""
-	if active, ok := al.codexStore.Active(sessionKey); ok && active != nil {
-		activeSessionID = strings.TrimSpace(active.ID)
-	}
 	runID = strings.TrimSpace(runID)
 	if runID == "" {
 		if active, ok := al.codexStore.ActiveRun(sessionKey); ok && active != nil {
@@ -199,12 +194,8 @@ func (al *AgentLoop) codexRunTail(sessionKey, runID string, lines int) (string, 
 	if !ok || run == nil {
 		return "", fmt.Errorf("codex run %q not found", runID)
 	}
-	if strings.TrimSpace(sessionKey) != "" {
-		sameScope := strings.EqualFold(strings.TrimSpace(run.ScopeKey), strings.TrimSpace(sessionKey))
-		sameSession := activeSessionID != "" && strings.EqualFold(strings.TrimSpace(run.SessionID), activeSessionID)
-		if !sameScope && !sameSession {
-			return "", fmt.Errorf("codex run %q does not belong to the active session in this chat", runID)
-		}
+	if active, ok := al.codexStore.Active(sessionKey); ok && active != nil && strings.TrimSpace(active.ID) != strings.TrimSpace(run.SessionID) {
+		return "", fmt.Errorf("codex run %q does not belong to the active session in this chat", runID)
 	}
 	if strings.TrimSpace(run.LogPath) == "" {
 		return "", nil
@@ -217,9 +208,6 @@ func (al *AgentLoop) startApprovedCodexRun(
 	agent *AgentInstance,
 	opts *processOptions,
 	userMessage string,
-	approvedPlanID string,
-	approvedPlanHash string,
-	approvedPlanText string,
 ) (string, error) {
 	if al == nil || al.codexStore == nil {
 		return "", fmt.Errorf("codex runs are not initialized")
@@ -252,12 +240,20 @@ func (al *AgentLoop) startApprovedCodexRun(
 		return "", fmt.Errorf("no codex-cli model configured in model_list")
 	}
 
+	history := agent.Sessions.GetHistory(opts.SessionKey)
+	summary := agent.Sessions.GetSummary(opts.SessionKey)
+	_, _, planText, err := al.currentApprovedCodexPlan(opts.SessionKey, history)
+	if err != nil {
+		al.clearCodexApprovalPending(opts.SessionKey)
+		return err.Error(), nil
+	}
+
 	run, err := al.codexStore.CreateRun(opts.SessionKey, codexRunCreateOptions{
 		PlannerModel:  plannerModel,
 		ExecutorModel: executorModel,
 		Mode:          "autonomous",
-		PlanID:        strings.TrimSpace(approvedPlanID),
-		PlanHash:      strings.TrimSpace(approvedPlanHash),
+		PlanID:        runtime.PendingPlanID,
+		PlanHash:      runtime.PendingPlanHash,
 		InitiatedBy:   strings.TrimSpace(opts.SenderID),
 	})
 	if err != nil {
@@ -286,12 +282,6 @@ func (al *AgentLoop) startApprovedCodexRun(
 		return "", err
 	}
 
-	history := agent.Sessions.GetHistory(opts.SessionKey)
-	summary := agent.Sessions.GetSummary(opts.SessionKey)
-	planText := strings.TrimSpace(approvedPlanText)
-	if planText == "" {
-		planText = latestAssistantMessage(history)
-	}
 	promptMessages := buildCodexExecutionPromptMessages(sessionRec, run, summary, history, planText, userMessage)
 	prompt := providers.BuildCodexCLIPrompt(promptMessages, nil)
 
@@ -574,6 +564,12 @@ func (al *AgentLoop) sendCodexRunNotification(channel, chatID string, run *codex
 		}
 	}
 	if isPicoClawRun(run) && run.Status == codexRunStatusSucceeded && strings.TrimSpace(run.Mode) != "deploy" {
+		if cfg := al.GetConfig(); cfg != nil && cfg.SelfImprove.Enabled {
+			targets := al.selfImproveTargets(cfg)
+			if len(targets) > 0 {
+				text += "\nUse `/self-improve ship <target>` to publish this run and advance a target deploy branch."
+			}
+		}
 		text += "\nReply `deploy` to apply and restart PicoClaw from this worktree."
 	}
 
@@ -590,55 +586,24 @@ func isPicoClawRun(run *codexRunRecord) bool {
 	if run == nil {
 		return false
 	}
-	for _, candidate := range []string{
-		codexRepoNameFromURL(run.RepoURL),
-		codexRepoNameFromPath(run.RepoPath),
-		codexRepoNameFromSlug(run.RepoSlug),
-	} {
-		if strings.EqualFold(candidate, "picoclaw") {
-			return true
+	equalsPicoclaw := func(raw string) bool {
+		name := strings.ToLower(strings.TrimSpace(raw))
+		return name == "picoclaw"
+	}
+	if equalsPicoclaw(run.RepoSlug) {
+		return true
+	}
+	if base := strings.ToLower(strings.TrimSpace(filepath.Base(strings.TrimSpace(run.RepoPath)))); base == "picoclaw" {
+		return true
+	}
+	if repoURL := strings.TrimSpace(run.RepoURL); repoURL != "" {
+		repoURL = strings.TrimSuffix(repoURL, ".git")
+		repoURL = strings.TrimSuffix(repoURL, "/")
+		if slash := strings.LastIndex(repoURL, "/"); slash >= 0 {
+			return equalsPicoclaw(repoURL[slash+1:])
 		}
 	}
 	return false
-}
-
-func codexRepoNameFromURL(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return ""
-	}
-	if strings.HasPrefix(raw, "git@") {
-		if idx := strings.Index(raw, ":"); idx >= 0 && idx+1 < len(raw) {
-			raw = raw[idx+1:]
-		}
-		return codexRepoNameFromPath(raw)
-	}
-	parsed, err := url.Parse(raw)
-	if err != nil {
-		return ""
-	}
-	return codexRepoNameFromPath(parsed.Path)
-}
-
-func codexRepoNameFromPath(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return ""
-	}
-	name := filepath.Base(strings.Trim(raw, "/"))
-	name = strings.TrimSpace(strings.TrimSuffix(name, ".git"))
-	return strings.ToLower(name)
-}
-
-func codexRepoNameFromSlug(raw string) string {
-	raw = strings.ToLower(strings.TrimSpace(raw))
-	if raw == "" {
-		return ""
-	}
-	if raw == "picoclaw" {
-		return raw
-	}
-	return ""
 }
 
 func killCodexProcess(pid int) error {
@@ -667,8 +632,7 @@ func codexPlanIdentity(planText string) (string, string) {
 		return "", ""
 	}
 	sum := sha256.Sum256([]byte(planText))
-	hash := hex.EncodeToString(sum[:])
-	return "plan-" + hash[:12], hash
+	return "plan-" + newCodexRunID(), hex.EncodeToString(sum[:8])
 }
 
 func tailFileLines(path string, lines int) (string, error) {

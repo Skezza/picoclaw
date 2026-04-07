@@ -57,6 +57,11 @@ type codexRunRecord struct {
 	PlanHash             string    `json:"plan_hash,omitempty"`
 	InitiatedBy          string    `json:"initiated_by,omitempty"`
 	DeployConfirmPending bool      `json:"deploy_confirm_pending,omitempty"`
+	PublishedBranch      string    `json:"published_branch,omitempty"`
+	PublishedSHA         string    `json:"published_sha,omitempty"`
+	ShippedTarget        string    `json:"shipped_target,omitempty"`
+	ShippedDeployBranch  string    `json:"shipped_deploy_branch,omitempty"`
+	ShippedSHA           string    `json:"shipped_sha,omitempty"`
 	Error                string    `json:"error,omitempty"`
 	CreatedAt            time.Time `json:"created_at"`
 	StartedAt            time.Time `json:"started_at,omitempty"`
@@ -246,6 +251,27 @@ func (s *codexSessionStore) GetRun(runID string) (*codexRunRecord, bool) {
 		return nil, false
 	}
 	return cloneCodexRunRecord(rec), true
+}
+
+func (s *codexSessionStore) UpdateRun(runID string, fn func(*codexRunRecord)) error {
+	runID = strings.TrimSpace(runID)
+	if s == nil || runID == "" {
+		return fmt.Errorf("run id is required")
+	}
+	if fn == nil {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rec := s.runs.Runs[runID]
+	if rec == nil {
+		return fmt.Errorf("run %q not found", runID)
+	}
+	fn(rec)
+	rec.UpdatedAt = time.Now().UTC()
+	return s.saveRunsLocked()
 }
 
 func (s *codexSessionStore) ListRuns(scopeKey string) []codexRunRecord {

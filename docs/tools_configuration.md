@@ -254,6 +254,103 @@ The cron tool is used for scheduling periodic tasks.
 
 For schedule types, execution modes (`deliver`, agent turn, and command jobs), persistence, and the current command-security gates, see [Scheduled Tasks and Cron Jobs](cron.md).
 
+## GitHub Tool
+
+The native `github` tool is a thin wrapper around the GitHub REST API. It is useful for the basic repository inspection flows that the remote GitHub MCP does not always expose cleanly, such as listing your repos, surfacing branches, reading files, and pulling workflow logs.
+
+Supported actions:
+
+- `me`
+- `my_repos`
+- `repo_summary`
+- `list_branches`
+- `list_directory`
+- `get_file`
+- `list_workflow_runs`
+- `get_workflow_run_logs`
+
+| Config            | Type   | Default                  | Description                                              |
+|-------------------|--------|--------------------------|----------------------------------------------------------|
+| `enabled`         | bool   | `false`                  | Register the native `github` tool                        |
+| `token`           | string | `""`                     | GitHub PAT used for REST requests                        |
+| `base_url`        | string | `https://api.github.com` | Override for GitHub Enterprise or compatible API base    |
+| `proxy`           | string | `""`                     | Optional HTTP/HTTPS/SOCKS5 proxy                         |
+| `timeout_seconds` | int    | `20`                     | Request timeout in seconds                               |
+
+If `token` is blank, PicoClaw also checks `GITHUB_MCP_PAT` and then `GITHUB_TOKEN` before refusing to register the tool. This lets you reuse the same secret you already wired for the GitHub MCP.
+
+### Configuration Example
+
+```json
+{
+  "tools": {
+    "github": {
+      "enabled": true,
+      "token": "",
+      "base_url": "https://api.github.com",
+      "proxy": "",
+      "timeout_seconds": 20
+    }
+  }
+}
+```
+
+## Home Assistant MCP
+
+| Config            | Type   | Default                 | Description                                         |
+|-------------------|--------|-------------------------|-----------------------------------------------------|
+| `enabled`         | bool   | `false`                 | Compatibility shim that injects a local Home Assistant MCP server |
+| `base_url`        | string | `http://127.0.0.1:8123` | Home Assistant base URL                             |
+| `token`           | string | `""`                    | Long-lived Home Assistant access token              |
+| `timeout_seconds` | int    | `15`                    | Request timeout in seconds                          |
+
+PicoClaw no longer registers a native `home_assistant` core tool. Instead, enabling `tools.home_assistant` synthesizes a local stdio MCP server named `home_assistant` that exposes these Home Assistant operations:
+
+- `status`
+- `list_entities`
+- `get_state`
+- `call_service`
+
+If you prefer explicit MCP wiring, define `tools.mcp.servers.home_assistant` yourself and leave `tools.home_assistant.enabled = false`.
+
+### Configuration Example
+
+```json
+{
+  "tools": {
+    "mcp": {
+      "enabled": true,
+      "servers": {
+        "home_assistant": {
+          "enabled": true,
+          "command": "/home/joe/.local/bin/picoclaw-mcp-homeassistant",
+          "env": {
+            "HOME_ASSISTANT_BASE_URL": "http://quanta.local:8123",
+            "HOME_ASSISTANT_TOKEN": "",
+            "HOME_ASSISTANT_TIMEOUT_SECONDS": "15"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### Compatibility Shim Example
+
+```json
+{
+  "tools": {
+    "home_assistant": {
+      "enabled": true,
+      "base_url": "http://quanta.local:8123",
+      "token": "",
+      "timeout_seconds": 15
+    }
+  }
+}
+```
+
 ## MCP Tool
 
 The MCP tool enables integration with external Model Context Protocol servers.
@@ -300,7 +397,7 @@ and injected into the context for a configured number of turns (`ttl`).
 | `env`      | object  | no       | Environment variables for stdio process                                                                                                                         |
 | `env_file` | string  | no       | Path to environment file for stdio process                                                                                                                      |
 | `url`      | string  | sse/http | Endpoint URL for `sse`/`http` transport                                                                                                                         |
-| `headers`  | object  | no       | HTTP headers for `sse`/`http` transport                                                                                                                         |
+| `headers`  | object  | no       | HTTP headers for `sse`/`http` transport. Values may reference process env vars like `${TOKEN}`.                                                                |
 
 ### Transport Behavior
 
@@ -309,6 +406,7 @@ and injected into the context for a configured number of turns (`ttl`).
     - `command` is set → `stdio`
 - `http` and `sse` both use `url` + optional `headers`.
 - `env` and `env_file` are only applied to `stdio` servers.
+- `headers` values are expanded with process environment variables before connecting. This is useful for secrets such as `Authorization: "Bearer ${GITHUB_MCP_PAT}"`.
 
 ### Configuration Examples
 
@@ -348,7 +446,7 @@ and injected into the context for a configured number of turns (`ttl`).
           "type": "sse",
           "url": "https://example.com/mcp",
           "headers": {
-            "Authorization": "Bearer YOUR_TOKEN"
+            "Authorization": "Bearer ${REMOTE_MCP_TOKEN}"
           }
         }
       }
@@ -356,6 +454,31 @@ and injected into the context for a configured number of turns (`ttl`).
   }
 }
 ```
+
+#### 2b) GitHub REST MCP via env-backed header
+
+```json
+{
+  "tools": {
+    "mcp": {
+      "enabled": true,
+      "servers": {
+        "github": {
+          "enabled": true,
+          "type": "http",
+          "url": "https://api.githubcopilot.com/mcp/",
+          "headers": {
+            "Authorization": "Bearer ${GITHUB_MCP_PAT}",
+            "X-MCP-Toolsets": "repos,issues,pull_requests"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Set `GITHUB_MCP_PAT` in the launcher/service environment instead of hardcoding it into `config.json`.
 
 #### 3) Massive MCP setup with Tool Discovery enabled
 
@@ -457,6 +580,18 @@ default (deferred). `aws` explicitly opts in to deferred mode even though it is 
 > `discovery.enabled: false` globally (all tools visible by default) and still mark individual
 > high-volume servers as `"deferred": true` to avoid polluting the context with their tools.
 
+#### 5) External SaaS starters
+
+For OAuth-heavy integrations such as Outlook/Microsoft 365, Google Workspace, and eBay, prefer:
+
+- disabled-by-default server entries in `config.json`
+- `"deferred": true` so large toolsets do not flood the prompt
+- `env_file` pointing at a private file with credentials
+
+Starter env templates are available in `config/mcp/*.env.example`.
+
+See [MCP Service Recipes](mcp_service_recipes.md) for copyable server blocks and setup notes.
+
 ## Skills Tool
 
 The skills tool configures skill discovery and installation via registries like ClawHub.
@@ -528,9 +663,6 @@ For example:
 - `PICOCLAW_TOOLS_EXEC_ENABLE_DENY_PATTERNS=false`
 - `PICOCLAW_TOOLS_CRON_EXEC_TIMEOUT_MINUTES=10`
 - `PICOCLAW_TOOLS_MCP_ENABLED=true`
-- `PICOCLAW_TOOLS_MCP_MAX_INLINE_TEXT_CHARS=16384`
 
 Note: Nested map-style config (for example `tools.mcp.servers.<name>.*`) is configured in `config.json` rather than
 environment variables.
-
-For MCP tools, `tools.mcp.max_inline_text_chars` controls how much text result is kept inline in model context. The threshold is counted in Unicode characters (Go runes), not bytes. For example, `16384` means up to 16,384 characters inline, which may occupy more than 16 KB for multibyte text such as CJK. Above this threshold, PicoClaw saves the MCP text result as a local artifact in the agent workspace and gives the model a short note plus a structured `[file:...]` artifact path instead of injecting the full payload into context.

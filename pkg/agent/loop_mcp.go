@@ -9,6 +9,11 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -60,17 +65,18 @@ func (r *mcpRuntime) hasManager() bool {
 // ensureMCPInitialized loads MCP servers/tools once so both Run() and direct
 // agent mode share the same initialization path.
 func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
-	if !al.cfg.Tools.IsToolEnabled("mcp") {
+	mcpCfg := effectiveMCPConfig(al.cfg)
+	if !mcpCfg.Enabled {
 		return nil
 	}
 
-	if al.cfg.Tools.MCP.Servers == nil || len(al.cfg.Tools.MCP.Servers) == 0 {
+	if mcpCfg.Servers == nil || len(mcpCfg.Servers) == 0 {
 		logger.WarnCF("agent", "MCP is enabled but no servers are configured, skipping MCP initialization", nil)
 		return nil
 	}
 
 	findValidServer := false
-	for _, serverCfg := range al.cfg.Tools.MCP.Servers {
+	for _, serverCfg := range mcpCfg.Servers {
 		if serverCfg.Enabled {
 			findValidServer = true
 		}
@@ -89,7 +95,7 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 			workspacePath = defaultAgent.Workspace
 		}
 
-		if err := mcpManager.LoadFromMCPConfig(ctx, al.cfg.Tools.MCP, workspacePath); err != nil {
+		if err := mcpManager.LoadFromMCPConfig(ctx, mcpCfg, workspacePath); err != nil {
 			logger.WarnCF("agent", "Failed to load MCP servers, MCP tools will not be available",
 				map[string]any{
 					"error": err.Error(),
@@ -115,8 +121,8 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 
 			// Determine whether this server's tools should be deferred (hidden).
 			// Per-server "deferred" field takes precedence over the global Discovery.Enabled.
-			serverCfg := al.cfg.Tools.MCP.Servers[serverName]
-			registerAsHidden := serverIsDeferred(al.cfg.Tools.MCP.Discovery.Enabled, serverCfg)
+			serverCfg := mcpCfg.Servers[serverName]
+			registerAsHidden := serverIsDeferred(mcpCfg.Discovery.Enabled, serverCfg)
 
 			for _, tool := range conn.Tools {
 				for _, agentID := range agentIDs {
@@ -156,9 +162,9 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 			})
 
 		// Initializes Discovery Tools only if enabled by configuration
-		if al.cfg.Tools.MCP.Enabled && al.cfg.Tools.MCP.Discovery.Enabled {
-			useBM25 := al.cfg.Tools.MCP.Discovery.UseBM25
-			useRegex := al.cfg.Tools.MCP.Discovery.UseRegex
+		if mcpCfg.Enabled && mcpCfg.Discovery.Enabled {
+			useBM25 := mcpCfg.Discovery.UseBM25
+			useRegex := mcpCfg.Discovery.UseRegex
 
 			// Fail fast: If discovery is enabled but no search method is turned on
 			if !useBM25 && !useRegex {
@@ -174,12 +180,12 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 				return
 			}
 
-			ttl := al.cfg.Tools.MCP.Discovery.TTL
+			ttl := mcpCfg.Discovery.TTL
 			if ttl <= 0 {
 				ttl = 5 // Default value
 			}
 
-			maxSearchResults := al.cfg.Tools.MCP.Discovery.MaxSearchResults
+			maxSearchResults := mcpCfg.Discovery.MaxSearchResults
 			if maxSearchResults <= 0 {
 				maxSearchResults = 5 // Default value
 			}
@@ -207,6 +213,68 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 	})
 
 	return al.mcp.getInitErr()
+}
+
+func effectiveMCPConfig(cfg *config.Config) config.MCPConfig {
+	if cfg == nil {
+		return config.MCPConfig{}
+	}
+	effective := cfg.Tools.MCP
+	if effective.Servers == nil {
+		effective.Servers = make(map[string]config.MCPServerConfig)
+	}
+
+	if !cfg.Tools.HomeAssistant.Enabled {
+		return effective
+	}
+	if _, exists := effective.Servers["home_assistant"]; exists {
+		return effective
+	}
+
+	command, err := resolveCompatMCPBinary("picoclaw-mcp-homeassistant")
+	if err != nil {
+		logger.WarnCF("agent", "Home Assistant MCP compatibility server unavailable",
+			map[string]any{"error": err.Error()})
+		return effective
+	}
+
+	falseValue := false
+	env := map[string]string{
+		"HOME_ASSISTANT_BASE_URL": strings.TrimSpace(cfg.Tools.HomeAssistant.BaseURL),
+		"HOME_ASSISTANT_TOKEN":    cfg.Tools.HomeAssistant.Token.String(),
+	}
+	if cfg.Tools.HomeAssistant.TimeoutSeconds > 0 {
+		env["HOME_ASSISTANT_TIMEOUT_SECONDS"] = strconv.Itoa(cfg.Tools.HomeAssistant.TimeoutSeconds)
+	}
+
+	effective.Enabled = true
+	effective.Servers["home_assistant"] = config.MCPServerConfig{
+		Enabled:  true,
+		Deferred: &falseValue,
+		Command:  command,
+		Type:     "stdio",
+		Env:      env,
+	}
+	return effective
+}
+
+func resolveCompatMCPBinary(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", fmt.Errorf("binary name is required")
+	}
+	if path, err := exec.LookPath(name); err == nil && strings.TrimSpace(path) != "" {
+		return path, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return "", fmt.Errorf("%s binary not found in PATH", name)
+	}
+	candidate := filepath.Join(home, ".local", "bin", name)
+	if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
+		return candidate, nil
+	}
+	return "", fmt.Errorf("%s binary not found in PATH or ~/.local/bin", name)
 }
 
 // serverIsDeferred reports whether an MCP server's tools should be registered

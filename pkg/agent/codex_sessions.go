@@ -615,6 +615,70 @@ func (al *AgentLoop) findCodexModelName(cfg *config.Config) string {
 	return ""
 }
 
+func (al *AgentLoop) codexDelegateTargets(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(cfg.ModelList)+3)
+	targets := make([]string, 0, len(cfg.ModelList)+3)
+	add := func(raw string) {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		targets = append(targets, name)
+	}
+
+	add(al.findCodexModelName(cfg))
+	add(cfg.Agents.Defaults.ModelName)
+	if cfg.Agents.Defaults.Routing != nil {
+		for _, label := range routingTierPrimaryLabels(cfg.Agents.Defaults.Routing) {
+			add(label)
+		}
+		if len(cfg.Agents.Defaults.Routing.Tiers) == 0 {
+			add(cfg.Agents.Defaults.Routing.LightModel)
+		}
+	}
+
+	for _, mc := range cfg.ModelList {
+		if mc == nil {
+			continue
+		}
+		add(mc.ModelName)
+	}
+
+	return targets
+}
+
+func routingTierPrimaryLabels(rc *config.RoutingConfig) []string {
+	if rc == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(rc.Tiers))
+	out := make([]string, 0, len(rc.Tiers))
+	for _, tier := range rc.Tiers {
+		if tier.Model == nil {
+			continue
+		}
+		name := strings.TrimSpace(tier.Model.Primary)
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, name)
+	}
+	return out
+}
+
 func (al *AgentLoop) codexWorkspaceOverride(sessionKey string, modelCfg *config.ModelConfig) string {
 	if al == nil || al.codexStore == nil || modelCfg == nil {
 		return ""
