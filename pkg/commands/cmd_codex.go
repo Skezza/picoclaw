@@ -155,13 +155,33 @@ func codexCommand() Definition {
 					if !ok || info == nil {
 						return req.Reply("No active codex session in this chat. Use /codex new or /codex resume first.")
 					}
+					if err := rt.SetSessionWorkMode("codex-plan"); err != nil {
+						return req.Reply(err.Error())
+					}
+					if rt.GetCodexApprovalPending != nil && rt.GetCodexApprovalPending() {
+						return req.Reply("A plan is already ready. Ask follow-up questions, or say `proceed` to run it. If you want to discard it and start over, use /codex replan.")
+					}
+					return req.Reply("Codex planning mode enabled. I will discuss and refine a plan only. When the plan is ready, I will ask you to reply `proceed` to execute it.")
+				},
+			},
+			{
+				Name:        "replan",
+				Description: "Discard the pending Codex plan and start over",
+				Handler: func(_ context.Context, req Request, rt *Runtime) error {
+					if rt == nil || rt.CodexActive == nil || rt.SetSessionWorkMode == nil {
+						return req.Reply(unavailableMsg)
+					}
+					info, ok := rt.CodexActive()
+					if !ok || info == nil {
+						return req.Reply("No active codex session in this chat. Use /codex new or /codex resume first.")
+					}
 					if rt.ClearCodexApprovalPending != nil {
 						rt.ClearCodexApprovalPending()
 					}
 					if err := rt.SetSessionWorkMode("codex-plan"); err != nil {
 						return req.Reply(err.Error())
 					}
-					return req.Reply("Codex planning mode enabled. I will discuss and refine a plan only. When the plan is ready, I will ask you to reply `proceed` to execute it.")
+					return req.Reply("Previous pending plan discarded. I’m back in planning mode.")
 				},
 			},
 			{
@@ -182,6 +202,7 @@ func codexCommand() Definition {
 						"- /codex runs",
 						"- /codex tail [run-id] [lines]",
 						"- /codex plan",
+						"- /codex replan",
 						"- /codex repos [limit]",
 						"- /codex projects",
 					}
