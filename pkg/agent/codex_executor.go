@@ -242,17 +242,10 @@ func (al *AgentLoop) startApprovedCodexRun(
 
 	history := agent.Sessions.GetHistory(opts.SessionKey)
 	summary := agent.Sessions.GetSummary(opts.SessionKey)
-	planText := latestAssistantMessage(history)
-	_, latestPlanHash := codexPlanIdentity(planText)
-	if latestPlanHash == "" || (strings.TrimSpace(runtime.PendingPlanHash) != "" && latestPlanHash != strings.TrimSpace(runtime.PendingPlanHash)) {
-		_ = al.codexStore.UpdateSessionRuntime(opts.SessionKey, func(runtime *codexSessionRuntimeState) {
-			runtime.WorkMode = "codex-plan"
-			runtime.ApprovalPending = false
-			runtime.PendingPlanID = ""
-			runtime.PendingPlanHash = ""
-		})
+	_, _, planText, err := al.currentApprovedCodexPlan(opts.SessionKey, history)
+	if err != nil {
 		al.clearCodexApprovalPending(opts.SessionKey)
-		return "The pending codex plan no longer matches the latest planner reply. Review the latest plan and reply `proceed` again.", nil
+		return err.Error(), nil
 	}
 
 	run, err := al.codexStore.CreateRun(opts.SessionKey, codexRunCreateOptions{
