@@ -461,6 +461,15 @@
           "command": "npx",
           "args": ["-y", "ebay-mcp"],
           "env_file": "/absolute/path/to/ebay.env"
+        },
+        "home_assistant": {
+          "enabled": false,
+          "command": "/home/joe/.local/bin/picoclaw-mcp-homeassistant",
+          "env": {
+            "HOME_ASSISTANT_BASE_URL": "http://127.0.0.1:8123",
+            "HOME_ASSISTANT_TOKEN": "",
+            "HOME_ASSISTANT_TIMEOUT_SECONDS": "15"
+          }
         }
       }
     },

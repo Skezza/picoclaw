@@ -29,36 +29,8 @@ func DefaultConfig() *Config {
 				MaxToolIterations:         50,
 				SummarizeMessageThreshold: 20,
 				SummarizeTokenPercent:     75,
-				Routing: &RoutingConfig{
-					Enabled:    true,
-					LightModel: "openrouter-free-qwen",
-					PaidTier:   "heavy",
-					Tiers: []RoutingTierConfig{
-						{
-							Name:     "fast",
-							MaxScore: 0.20,
-							Model: &AgentModelConfig{
-								Primary:   "gpt-5.4-nano",
-								Fallbacks: []string{"gpt-5-nano"},
-							},
-						},
-						{
-							Name: "tools",
-							Model: &AgentModelConfig{
-								Primary:   "gpt-5.4-mini",
-								Fallbacks: []string{"gpt-5-mini"},
-							},
-						},
-						{
-							Name: "heavy",
-							Model: &AgentModelConfig{
-								Primary:   "gpt-5-mini",
-								Fallbacks: []string{"gpt-5.4-mini"},
-							},
-						},
-					},
-				},
-				SteeringMode: "one-at-a-time",
+				Routing:                   nil,
+				SteeringMode:              "one-at-a-time",
 				ToolFeedback: ToolFeedbackConfig{
 					Enabled:       false,
 					MaxArgsLength: 300,

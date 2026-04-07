@@ -79,6 +79,12 @@ func (al *AgentLoop) ensureSelfImproveSession(scopeKey string, cfg *config.Confi
 	if err != nil {
 		return nil, err
 	}
+	if err := ensureGitRemoteForSelfImprove(rec.RepoPath, cfg.SelfImprove); err != nil {
+		return nil, err
+	}
+	if err := syncSelfImproveRepo(rec.RepoPath); err != nil {
+		return nil, err
+	}
 
 	_ = al.codexStore.SetSessionRuntime(scopeKey, codexSessionRuntimeState{
 		PlannerModel:  plannerModel,
@@ -284,6 +290,31 @@ func ensureGitRemoteForSelfImprove(repoPath string, cfg config.SelfImproveConfig
 	return err
 }
 
+func syncSelfImproveRepo(repoPath string) error {
+	if !isGitRepo(repoPath) {
+		return fmt.Errorf("self-improve repo path is not a git repository: %s", repoPath)
+	}
+	if _, err := gitOutput(repoPath, "fetch", "--prune", "origin"); err != nil {
+		return err
+	}
+
+	ref, err := gitOutput(repoPath, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+	if err != nil {
+		ref = "origin/main"
+	}
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		ref = "origin/main"
+	}
+	branch := strings.TrimPrefix(ref, "origin/")
+	if branch == "" || branch == ref {
+		branch = "main"
+		ref = "origin/" + branch
+	}
+	_, err = gitOutput(repoPath, "checkout", "-B", branch, ref)
+	return err
+}
+
 func validateSelfImproveWorktree(worktree string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), selfImproveValidateTimeout)
 	defer cancel()
@@ -311,6 +342,9 @@ func validateSelfImproveWorktree(worktree string) error {
 	}
 	if dirExists(filepath.Join(worktree, "cmd", "picoclaw-mcp-fs")) {
 		steps = append(steps, []string{goBin, "build", "-v", "-tags", "goolm,stdjson", "-o", filepath.Join(tmpDir, "picoclaw-mcp-fs"), "./cmd/picoclaw-mcp-fs"})
+	}
+	if dirExists(filepath.Join(worktree, "cmd", "picoclaw-mcp-homeassistant")) {
+		steps = append(steps, []string{goBin, "build", "-v", "-tags", "goolm,stdjson", "-o", filepath.Join(tmpDir, "picoclaw-mcp-homeassistant"), "./cmd/picoclaw-mcp-homeassistant"})
 	}
 	for _, step := range steps {
 		cmd := exec.CommandContext(ctx, step[0], step[1:]...)

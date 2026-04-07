@@ -10,6 +10,7 @@ INSTALL_ROOT="${INSTALL_ROOT:-$HOME/.local/lib/picoclaw}"
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
 PICOCLAW_HOME="${PICOCLAW_HOME:-$HOME/.picoclaw}"
 RELEASES_ROOT="${RELEASES_ROOT:-$PICOCLAW_HOME/releases}"
+SELF_IMPROVE_RUNTIME_DIR="${SELF_IMPROVE_RUNTIME_DIR:-$PICOCLAW_HOME/runtime/self-improve}"
 GO_BIN="${GO_BIN:-}"
 
 if [[ -z "$GO_BIN" ]]; then
@@ -33,7 +34,7 @@ if [[ -z "$GO_BIN" || ! -x "$GO_BIN" ]]; then
   exit 1
 fi
 
-mkdir -p "$INSTALL_ROOT" "$BIN_DIR" "$RELEASES_ROOT"
+mkdir -p "$INSTALL_ROOT" "$BIN_DIR" "$RELEASES_ROOT" "$SELF_IMPROVE_RUNTIME_DIR"
 export PATH="$HOME/.local/bin:${PATH:-}"
 build_cache_root="${PICOCLAW_HOME}/build-cache"
 mkdir -p "$build_cache_root/tmp" "$build_cache_root/go-build" "$build_cache_root/pkg/mod"
@@ -61,14 +62,21 @@ CGO_ENABLED=0 "$GO_BIN" -C "$SRC_DIR" build -v -tags goolm,stdjson -o "$tmp_dir/
 if [[ -d "$SRC_DIR/cmd/picoclaw-mcp-fs" ]]; then
   CGO_ENABLED=0 "$GO_BIN" -C "$SRC_DIR" build -v -tags goolm,stdjson -o "$tmp_dir/picoclaw-mcp-fs" ./cmd/picoclaw-mcp-fs
 fi
+if [[ -d "$SRC_DIR/cmd/picoclaw-mcp-homeassistant" ]]; then
+  CGO_ENABLED=0 "$GO_BIN" -C "$SRC_DIR" build -v -tags goolm,stdjson -o "$tmp_dir/picoclaw-mcp-homeassistant" ./cmd/picoclaw-mcp-homeassistant
+fi
 
 mv "$tmp_dir" "$release_dir"
 
 old_picoclaw="$(readlink -f "$BIN_DIR/picoclaw" 2>/dev/null || true)"
 old_launcher="$(readlink -f "$BIN_DIR/picoclaw-launcher" 2>/dev/null || true)"
 old_mcp_fs="$(readlink -f "$BIN_DIR/picoclaw-mcp-fs" 2>/dev/null || true)"
+old_mcp_homeassistant="$(readlink -f "$BIN_DIR/picoclaw-mcp-homeassistant" 2>/dev/null || true)"
 if [[ -z "$old_mcp_fs" && -f "$BIN_DIR/picoclaw-mcp-fs" ]]; then
   old_mcp_fs="$BIN_DIR/picoclaw-mcp-fs"
+fi
+if [[ -z "$old_mcp_homeassistant" && -f "$BIN_DIR/picoclaw-mcp-homeassistant" ]]; then
+  old_mcp_homeassistant="$BIN_DIR/picoclaw-mcp-homeassistant"
 fi
 if [[ -z "$old_picoclaw" ]]; then
   old_picoclaw="$INSTALL_ROOT/picoclaw"
@@ -78,6 +86,9 @@ if [[ -z "$old_launcher" ]]; then
 fi
 if [[ -z "$old_mcp_fs" ]]; then
   old_mcp_fs="$INSTALL_ROOT/picoclaw-mcp-fs"
+fi
+if [[ -z "$old_mcp_homeassistant" ]]; then
+  old_mcp_homeassistant="$INSTALL_ROOT/picoclaw-mcp-homeassistant"
 fi
 
 rollback_dir="$(mktemp -d)"
@@ -98,6 +109,12 @@ rollback() {
   elif [[ -n "$old_mcp_fs" ]]; then
     rm -f "$old_mcp_fs"
   fi
+  if [[ -f "$rollback_dir/picoclaw-mcp-homeassistant" ]]; then
+    cat "$rollback_dir/picoclaw-mcp-homeassistant" > "$old_mcp_homeassistant"
+    chmod +x "$old_mcp_homeassistant"
+  elif [[ -n "$old_mcp_homeassistant" ]]; then
+    rm -f "$old_mcp_homeassistant"
+  fi
   systemctl --user start "$SERVICE_NAME" || true
 }
 
@@ -110,10 +127,25 @@ fi
 if [[ -n "$old_mcp_fs" && -f "$old_mcp_fs" ]]; then
   cp "$old_mcp_fs" "$rollback_dir/picoclaw-mcp-fs"
 fi
+if [[ -n "$old_mcp_homeassistant" && -f "$old_mcp_homeassistant" ]]; then
+  cp "$old_mcp_homeassistant" "$rollback_dir/picoclaw-mcp-homeassistant"
+fi
 
 chmod +x "$release_dir/picoclaw" "$release_dir/picoclaw-launcher"
 if [[ -f "$release_dir/picoclaw-mcp-fs" ]]; then
   chmod +x "$release_dir/picoclaw-mcp-fs"
+fi
+if [[ -f "$release_dir/picoclaw-mcp-homeassistant" ]]; then
+  chmod +x "$release_dir/picoclaw-mcp-homeassistant"
+fi
+if [[ -f "$SRC_DIR/scripts/picoclaw_deploy_local.sh" ]]; then
+  install -m 755 "$SRC_DIR/scripts/picoclaw_deploy_local.sh" "$SELF_IMPROVE_RUNTIME_DIR/picoclaw_deploy_local.sh"
+fi
+if [[ -f "$SRC_DIR/scripts/picoclaw_self_improve_poller.sh" ]]; then
+  install -m 755 "$SRC_DIR/scripts/picoclaw_self_improve_poller.sh" "$SELF_IMPROVE_RUNTIME_DIR/picoclaw_self_improve_poller.sh"
+fi
+if [[ -f "$SRC_DIR/scripts/picoclaw_self_improve_install_target.sh" ]]; then
+  install -m 755 "$SRC_DIR/scripts/picoclaw_self_improve_install_target.sh" "$SELF_IMPROVE_RUNTIME_DIR/picoclaw_self_improve_install_target.sh"
 fi
 
 systemctl --user stop "$SERVICE_NAME"
@@ -124,6 +156,10 @@ chmod +x "$old_launcher"
 if [[ -f "$release_dir/picoclaw-mcp-fs" ]]; then
   cat "$release_dir/picoclaw-mcp-fs" > "$old_mcp_fs"
   chmod +x "$old_mcp_fs"
+fi
+if [[ -f "$release_dir/picoclaw-mcp-homeassistant" ]]; then
+  cat "$release_dir/picoclaw-mcp-homeassistant" > "$old_mcp_homeassistant"
+  chmod +x "$old_mcp_homeassistant"
 fi
 
 systemctl --user start "$SERVICE_NAME"

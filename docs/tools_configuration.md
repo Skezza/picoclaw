@@ -295,25 +295,48 @@ If `token` is blank, PicoClaw also checks `GITHUB_MCP_PAT` and then `GITHUB_TOKE
 }
 ```
 
-## Home Assistant Tool
+## Home Assistant MCP
 
-The native `home_assistant` tool is a thin wrapper over the Home Assistant REST API. It is intended to keep PicoClaw focused on agent behavior while Home Assistant owns the device integrations, including Tuya.
+| Config            | Type   | Default                 | Description                                         |
+|-------------------|--------|-------------------------|-----------------------------------------------------|
+| `enabled`         | bool   | `false`                 | Compatibility shim that injects a local Home Assistant MCP server |
+| `base_url`        | string | `http://127.0.0.1:8123` | Home Assistant base URL                             |
+| `token`           | string | `""`                    | Long-lived Home Assistant access token              |
+| `timeout_seconds` | int    | `15`                    | Request timeout in seconds                          |
 
-Supported actions:
+PicoClaw no longer registers a native `home_assistant` core tool. Instead, enabling `tools.home_assistant` synthesizes a local stdio MCP server named `home_assistant` that exposes these Home Assistant operations:
 
 - `status`
 - `list_entities`
 - `get_state`
 - `call_service`
 
-| Config            | Type   | Default                 | Description                                         |
-|-------------------|--------|-------------------------|-----------------------------------------------------|
-| `enabled`         | bool   | `false`                 | Register the native `home_assistant` tool           |
-| `base_url`        | string | `http://127.0.0.1:8123` | Home Assistant base URL                             |
-| `token`           | string | `""`                    | Long-lived Home Assistant access token              |
-| `timeout_seconds` | int    | `15`                    | Request timeout in seconds                          |
+If you prefer explicit MCP wiring, define `tools.mcp.servers.home_assistant` yourself and leave `tools.home_assistant.enabled = false`.
 
 ### Configuration Example
+
+```json
+{
+  "tools": {
+    "mcp": {
+      "enabled": true,
+      "servers": {
+        "home_assistant": {
+          "enabled": true,
+          "command": "/home/joe/.local/bin/picoclaw-mcp-homeassistant",
+          "env": {
+            "HOME_ASSISTANT_BASE_URL": "http://quanta.local:8123",
+            "HOME_ASSISTANT_TOKEN": "",
+            "HOME_ASSISTANT_TIMEOUT_SECONDS": "15"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### Compatibility Shim Example
 
 ```json
 {
