@@ -73,7 +73,7 @@ func (al *AgentLoop) ensureSelfImproveSession(scopeKey string, cfg *config.Confi
 			return nil, err
 		}
 	}
-	if _, err := exec.LookPath("codex"); err != nil {
+	if _, err := resolveSelfImproveBinary("codex"); err != nil {
 		return nil, fmt.Errorf("codex binary not found on host; install Codex CLI first")
 	}
 

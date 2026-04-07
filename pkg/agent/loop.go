@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -3896,7 +3895,7 @@ func (al *AgentLoop) buildCommandsRuntime(agent *AgentInstance, opts *processOpt
 			if err := validateSessionModel(plannerModel); err != nil {
 				return nil, err
 			}
-			if _, err := exec.LookPath("codex"); err != nil {
+			if _, err := resolveSelfImproveBinary("codex"); err != nil {
 				return nil, fmt.Errorf("codex binary not found on host; install Codex CLI first")
 			}
 
@@ -3939,7 +3938,7 @@ func (al *AgentLoop) buildCommandsRuntime(agent *AgentInstance, opts *processOpt
 			if err := validateSessionModel(plannerModel); err != nil {
 				return nil, err
 			}
-			if _, err := exec.LookPath("codex"); err != nil {
+			if _, err := resolveSelfImproveBinary("codex"); err != nil {
 				return nil, fmt.Errorf("codex binary not found on host; install Codex CLI first")
 			}
 

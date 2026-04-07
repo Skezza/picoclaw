@@ -127,6 +127,52 @@ func TestCodexSessionStore_RunLifecycleAndPersistence(t *testing.T) {
 	}
 }
 
+func TestCodexSessionStore_CreateOrActivate_AllowsEquivalentGitHubRemotes(t *testing.T) {
+	workspace := t.TempDir()
+	store := newCodexSessionStore(workspace)
+	if store == nil {
+		t.Fatal("expected codex session store")
+	}
+
+	scopeKey := "agent:test:main"
+	slug := "skezza-picoclaw"
+	repoPath, err := store.repoPathForSlug(slug)
+	if err != nil {
+		t.Fatalf("repoPathForSlug() error = %v", err)
+	}
+	if err := initGitRepo(t, repoPath); err != nil {
+		t.Fatalf("initGitRepo() error = %v", err)
+	}
+
+	session, err := store.CreateOrActivate(scopeKey, slug, "git@github.com:Skezza/picoclaw.git")
+	if err != nil {
+		t.Fatalf("CreateOrActivate() error = %v", err)
+	}
+	if session == nil {
+		t.Fatal("CreateOrActivate() returned nil session")
+	}
+
+	session, err = store.CreateOrActivate(scopeKey, slug, "https://github.com/Skezza/picoclaw.git")
+	if err != nil {
+		t.Fatalf("CreateOrActivate() with equivalent https remote error = %v", err)
+	}
+	if session == nil {
+		t.Fatal("CreateOrActivate() returned nil session after remote normalization")
+	}
+	if got := session.RepoURL; got != "https://github.com/Skezza/picoclaw.git" {
+		t.Fatalf("RepoURL = %q, want %q", got, "https://github.com/Skezza/picoclaw.git")
+	}
+}
+
+func TestRepoSourcesEquivalent_GitHubSSHAndHTTPS(t *testing.T) {
+	if !repoSourcesEquivalent("git@github.com:Skezza/picoclaw.git", "https://github.com/Skezza/picoclaw.git") {
+		t.Fatal("expected GitHub SSH and HTTPS remotes to be treated as equivalent")
+	}
+	if repoSourcesEquivalent("git@github.com:Skezza/picoclaw.git", "https://github.com/Skezza/other.git") {
+		t.Fatal("different GitHub repositories should not be equivalent")
+	}
+}
+
 func TestCodexSessionStore_ReconcileRunsMarksDeadPidUnknown(t *testing.T) {
 	workspace := t.TempDir()
 	store := newCodexSessionStore(workspace)
