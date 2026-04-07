@@ -217,8 +217,10 @@ func (s *codexSessionStore) CreateRun(scopeKey string, opts codexRunCreateOption
 	s.runs.ActiveBySession[scopeKey] = rec.ID
 	s.runs.ActiveByRepo[sessionRec.RepoPath] = rec.ID
 	sessionRec.ActiveRunID = rec.ID
-	sessionRec.PlannerModel = rec.PlannerModel
-	sessionRec.ExecutorModel = rec.ExecutorModel
+	if !strings.EqualFold(rec.Mode, "deploy") {
+		sessionRec.PlannerModel = rec.PlannerModel
+		sessionRec.ExecutorModel = rec.ExecutorModel
+	}
 	sessionRec.WorkMode = "codex-plan"
 	sessionRec.ApprovalPending = false
 	sessionRec.DeployConfirmPending = opts.DeployConfirmPending
