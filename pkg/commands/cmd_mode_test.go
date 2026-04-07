@@ -20,7 +20,7 @@ func newModeTestRuntime() *Runtime {
 							{
 								Name: "fast",
 								Model: &config.AgentModelConfig{
-									Primary: "gpt-5.4-nano",
+									Primary: "gpt-5.4-mini",
 								},
 							},
 							{
@@ -150,8 +150,8 @@ func TestSessionModeTargets_DefaultConfigAlignsWithRoutingDefaults(t *testing.T)
 
 	targets := sessionModeTargets(rt)
 
-	if targets.Fast.Target != "tier:fast" || targets.Fast.Label != "gpt-5.4-nano" {
-		t.Fatalf("fast=%+v, want tier:fast / gpt-5.4-nano", targets.Fast)
+	if targets.Fast.Target != "tier:fast" || targets.Fast.Label != "gpt-5.4-mini" {
+		t.Fatalf("fast=%+v, want tier:fast / gpt-5.4-mini", targets.Fast)
 	}
 	if targets.Tools.Target != "tier:tools" || targets.Tools.Label != "gpt-5.4-mini" {
 		t.Fatalf("tools=%+v, want tier:tools / gpt-5.4-mini", targets.Tools)
@@ -258,7 +258,7 @@ func TestStatusCommand_ReportsPendingBoost(t *testing.T) {
 		"Session Mode: boost armed for next message (gpt-5.4)",
 		"Work Mode: code",
 		"Pending Boost: gpt-5.4",
-		"Fast Model: gpt-5.4-nano",
+		"Fast Model: gpt-5.4-mini",
 		"Heavy Model: gpt-5.4",
 		"Tools Model: gpt-5.4-mini",
 	}) {

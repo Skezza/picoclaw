@@ -322,7 +322,7 @@ func TestDefaultConfig_TieredRoutingHydrated(t *testing.T) {
 	}{
 		"fast": {
 			maxScore:  0.20,
-			primary:   "gpt-5.4-nano",
+			primary:   "gpt-5.4-mini",
 			fallbacks: []string{},
 		},
 		"tools": {

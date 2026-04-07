@@ -37,7 +37,7 @@ func DefaultConfig() *Config {
 							Name:     "fast",
 							MaxScore: 0.20,
 							Model: &AgentModelConfig{
-								Primary:   "gpt-5.4-nano",
+								Primary:   "gpt-5.4-mini",
 								Fallbacks: []string{},
 							},
 						},
