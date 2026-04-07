@@ -280,7 +280,7 @@ func TestProcessMessage_CodeWorkModeInjectsPrompt(t *testing.T) {
 	}
 }
 
-func TestProcessMessage_CodexPlanModeInjectsPromptAndDisablesTools(t *testing.T) {
+func TestProcessMessage_CodexPlanModeInjectsPromptAndAllowsOnlyReadOnlyTools(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := &config.Config{
 		Agents: config.AgentsConfig{
@@ -317,8 +317,16 @@ func TestProcessMessage_CodexPlanModeInjectsPromptAndDisablesTools(t *testing.T)
 	if !strings.Contains(systemPrompt, "## Codex Planning Mode") {
 		t.Fatalf("system prompt missing codex planning mode section:\n%s", systemPrompt)
 	}
-	if len(provider.lastTools) != 0 {
-		t.Fatalf("planning mode should disable tools, got %d tool defs", len(provider.lastTools))
+	if !strings.Contains(systemPrompt, "read-only inspection tools") {
+		t.Fatalf("system prompt missing read-only guidance:\n%s", systemPrompt)
+	}
+	if len(provider.lastTools) == 0 {
+		t.Fatal("planning mode should retain read-only inspection tools")
+	}
+	for _, td := range provider.lastTools {
+		if _, ok := codexPlanningAllowedToolNames[td.Function.Name]; !ok {
+			t.Fatalf("unexpected planning tool %q exposed", td.Function.Name)
+		}
 	}
 }
 
@@ -397,7 +405,7 @@ func TestProcessMessage_CodexPlanModeArmsApprovalWhenMarkerPresent(t *testing.T)
 	}
 }
 
-func TestProcessMessage_CodexPlanModeArmsApprovalWhenResponseClearlyOffersProceed(t *testing.T) {
+func TestProcessMessage_CodexPlanModeDoesNotArmApprovalWithoutExplicitMarker(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := &config.Config{
 		Agents: config.AgentsConfig{
@@ -424,11 +432,80 @@ func TestProcessMessage_CodexPlanModeArmsApprovalWhenResponseClearlyOffersProcee
 	if err != nil {
 		t.Fatalf("processMessage() error = %v", err)
 	}
-	if !strings.Contains(response, "Reply `proceed` to execute this plan.") {
-		t.Fatalf("response=%q, want proceed instruction", response)
+	if strings.Contains(response, "Reply `proceed` to execute this plan.") {
+		t.Fatalf("response=%q, did not want proceed instruction without explicit marker", response)
+	}
+	if al.hasCodexApprovalPending(sessionKey) {
+		t.Fatal("did not expect approval to be armed without explicit marker")
+	}
+}
+
+func TestNormalizeCodexPlanningReplyWithState_RequiresExplicitMarker(t *testing.T) {
+	content := "Plan:\n1. Inspect the repo\n2. Summarize findings\n\nIf you want, I can proceed with the change next."
+	normalized, armed, preserve := normalizeCodexPlanningReplyWithState(content, false)
+	if armed {
+		t.Fatal("did not expect approval to arm without explicit marker")
+	}
+	if preserve {
+		t.Fatal("did not expect preservePending without existing approval")
+	}
+	if !strings.Contains(normalized, "If you want, I can proceed with the change next.") {
+		t.Fatalf("normalized=%q, want original content preserved", normalized)
+	}
+}
+
+func TestProcessMessage_CodexPlanModePreservesPendingApprovalOnFollowUp(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				ModelName:         "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+	msgBus := bus.NewMessageBus()
+	provider := &recordingProvider{responseText: "Yes. I’ll create a branch first and report back before changing anything."}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	sessionKey := sessionKeyAgentPrefix + routing.DefaultAgentID + ":main"
+	approvedPlan := "Plan:\n1. Create a feature branch.\n2. Make the targeted change.\n3. Run focused validation.\n\nReply `proceed` to execute this plan."
+
+	if _, err := al.codexStore.CreateOrActivate(sessionKey, "picoclaw", ""); err != nil {
+		t.Fatalf("CreateOrActivate() error = %v", err)
+	}
+	al.setSessionWorkMode(sessionKey, "codex-plan")
+	al.setCodexApprovalState(sessionKey, true, approvedPlan)
+	if !al.hasCodexApprovalPending(sessionKey) {
+		t.Fatal("expected approval to be pending before follow-up")
+	}
+
+	response, err := al.processMessage(context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "telegram:123",
+		ChatID:   "chat-1",
+		Content:  "Will you create a branch first?",
+	})
+	if err != nil {
+		t.Fatalf("processMessage() error = %v", err)
+	}
+	if response != provider.responseText {
+		t.Fatalf("response=%q, want follow-up answer preserved", response)
 	}
 	if !al.hasCodexApprovalPending(sessionKey) {
-		t.Fatal("expected approval to be armed")
+		runtime, _ := al.codexStore.SessionRuntime(sessionKey)
+		t.Fatalf("expected approval to remain pending after a follow-up answer, runtime=%+v", runtime)
+	}
+	runtime, ok := al.codexStore.SessionRuntime(sessionKey)
+	if !ok {
+		t.Fatal("expected codex runtime")
+	}
+	if runtime.PendingPlanText != approvedPlan {
+		t.Fatalf("pending plan text changed:\n got: %q\nwant: %q", runtime.PendingPlanText, approvedPlan)
+	}
+	if !strings.Contains(provider.lastMessages[0].Content, "A codex plan is already pending approval.") {
+		t.Fatalf("system prompt missing pending-plan guidance:\n%s", provider.lastMessages[0].Content)
 	}
 }
 
@@ -541,7 +618,6 @@ func TestProcessMessage_CodexProceedLaunchesBackgroundRun(t *testing.T) {
 	approvedPlan := "Plan:\n- update the repo\nReply `proceed` to execute this plan."
 	approvedPlanID, approvedPlanHash := codexPlanIdentity(approvedPlan)
 	if err := al.codexStore.SetSessionRuntime(sessionKey, codexSessionRuntimeState{
-		PlannerModel:    "test-model",
 		ExecutorModel:   "codex-local",
 		WorkMode:        "codex-plan",
 		ApprovalPending: true,
@@ -658,6 +734,108 @@ func TestProcessMessage_CodexProceedRequiresLatestApprovedPlanHash(t *testing.T)
 	}
 	if runs := al.codexStore.ListRuns(sessionKey); len(runs) != 0 {
 		t.Fatalf("expected 0 codex runs after mismatch, got %d", len(runs))
+	}
+}
+
+func TestProcessMessage_CodexProceedUsesStoredApprovedPlanAfterFollowUp(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				ModelName:         "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+	msgBus := bus.NewMessageBus()
+	provider := &recordingProvider{responseText: "Yes. I’ll create a branch first and keep the current plan unchanged."}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	sessionKey := sessionKeyAgentPrefix + routing.DefaultAgentID + ":main"
+
+	repoPath := filepath.Join(tmpDir, "repos", "picoclaw")
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = repoPath
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s failed: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	run("git", "init", "-b", "main")
+	run("git", "config", "user.email", "test@example.com")
+	run("git", "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(repoPath, "README.md"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	run("git", "add", "README.md")
+	run("git", "commit", "-m", "init")
+
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	codexPath := filepath.Join(binDir, "codex")
+	codexStub := "#!/bin/sh\ncat >/dev/null\nsleep 1\nprintf '{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"agent_message\",\"text\":\"Run complete\"}}\\n'\nprintf '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}\\n'\n"
+	if err := os.WriteFile(codexPath, []byte(codexStub), 0o755); err != nil {
+		t.Fatalf("write codex stub: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if _, err := al.codexStore.CreateOrActivate(sessionKey, "picoclaw", ""); err != nil {
+		t.Fatalf("CreateOrActivate() error = %v", err)
+	}
+	approvedPlan := "Plan:\n- create a feature branch\n- update the repo\n- run focused validation\n\nReply `proceed` to execute this plan."
+	approvedPlanID, approvedPlanHash := codexPlanIdentity(approvedPlan)
+	if err := al.codexStore.SetSessionRuntime(sessionKey, codexSessionRuntimeState{
+		ExecutorModel:   "codex-local",
+		WorkMode:        "codex-plan",
+		ApprovalPending: true,
+		PendingPlanID:   approvedPlanID,
+		PendingPlanHash: approvedPlanHash,
+		PendingPlanText: approvedPlan,
+	}); err != nil {
+		t.Fatalf("SetSessionRuntime() error = %v", err)
+	}
+	defaultAgent := al.GetRegistry().GetDefaultAgent()
+	defaultAgent.Sessions.AddMessage(sessionKey, "assistant", approvedPlan)
+	al.setSessionWorkMode(sessionKey, "codex-plan")
+
+	followUpResp, err := al.processMessage(context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "telegram:123",
+		ChatID:   "chat-1",
+		Content:  "Will you branch first?",
+	})
+	if err != nil {
+		t.Fatalf("follow-up processMessage() error = %v", err)
+	}
+	if followUpResp != provider.responseText {
+		t.Fatalf("follow-up response=%q, want %q", followUpResp, provider.responseText)
+	}
+	if !al.hasCodexApprovalPending(sessionKey) {
+		t.Fatal("approval should still be pending after follow-up")
+	}
+
+	response, err := al.processMessage(context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "telegram:123",
+		ChatID:   "chat-1",
+		Content:  "proceed",
+	})
+	if err != nil {
+		t.Fatalf("processMessage() error = %v", err)
+	}
+	if !strings.Contains(response, "Codex run started:") {
+		t.Fatalf("response=%q, want run start message", response)
+	}
+	if runs := al.codexStore.ListRuns(sessionKey); len(runs) != 1 {
+		t.Fatalf("expected 1 codex run, got %d", len(runs))
 	}
 }
 
@@ -3711,6 +3889,26 @@ func TestFilterClientWebSearch_EmptyInput(t *testing.T) {
 	result := filterClientWebSearch(nil)
 	if len(result) != 0 {
 		t.Fatalf("len(result) = %d, want 0", len(result))
+	}
+}
+
+func TestFilterCodexPlanningTools_KeepOnlyAllowedTools(t *testing.T) {
+	defs := []providers.ToolDefinition{
+		{Type: "function", Function: providers.ToolFunctionDefinition{Name: "read_file"}},
+		{Type: "function", Function: providers.ToolFunctionDefinition{Name: "git"}},
+		{Type: "function", Function: providers.ToolFunctionDefinition{Name: "github"}},
+		{Type: "function", Function: providers.ToolFunctionDefinition{Name: "exec"}},
+		{Type: "function", Function: providers.ToolFunctionDefinition{Name: "write_file"}},
+	}
+
+	result := filterCodexPlanningTools(defs)
+	if len(result) != 3 {
+		t.Fatalf("len(result) = %d, want 3", len(result))
+	}
+	for _, td := range result {
+		if _, ok := codexPlanningAllowedToolNames[td.Function.Name]; !ok {
+			t.Fatalf("unexpected tool %q preserved", td.Function.Name)
+		}
 	}
 }
 

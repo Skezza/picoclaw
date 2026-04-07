@@ -25,6 +25,7 @@ var (
 	ctxKeyChatID           = &toolCtxKey{"chatID"}
 	ctxKeyMessageID        = &toolCtxKey{"messageID"}
 	ctxKeyReplyToMessageID = &toolCtxKey{"replyToMessageID"}
+	ctxKeyWorkMode         = &toolCtxKey{"workMode"}
 )
 
 // WithToolContext returns a child context carrying channel and chatID.
@@ -51,6 +52,11 @@ func WithToolInboundContext(
 	return ctx
 }
 
+// WithToolWorkMode returns a child context carrying the current session work mode.
+func WithToolWorkMode(ctx context.Context, workMode string) context.Context {
+	return context.WithValue(ctx, ctxKeyWorkMode, workMode)
+}
+
 // ToolChannel extracts the channel from ctx, or "" if unset.
 func ToolChannel(ctx context.Context) string {
 	v, _ := ctx.Value(ctxKeyChannel).(string)
@@ -72,6 +78,12 @@ func ToolMessageID(ctx context.Context) string {
 // ToolReplyToMessageID extracts the current inbound reply target from ctx, or "" if unset.
 func ToolReplyToMessageID(ctx context.Context) string {
 	v, _ := ctx.Value(ctxKeyReplyToMessageID).(string)
+	return v
+}
+
+// ToolWorkMode extracts the current session work mode from ctx, or "" if unset.
+func ToolWorkMode(ctx context.Context) string {
+	v, _ := ctx.Value(ctxKeyWorkMode).(string)
 	return v
 }
 
