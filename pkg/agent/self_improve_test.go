@@ -11,7 +11,7 @@ import (
 func TestValidateSelfImproveArchitecturePolicyRejectsNewNativeTool(t *testing.T) {
 	t.Parallel()
 
-	err := validateSelfImproveArchitecturePolicy([]selfImproveChange{
+	err := validateSelfImproveArchitecturePolicy(t.TempDir(), []selfImproveChange{
 		{Status: "A", Path: "pkg/tools/home_assistant.go", Committed: true},
 		{Status: "??", Path: "pkg/tools/outlook.go"},
 	})
@@ -30,10 +30,34 @@ func TestValidateSelfImproveArchitecturePolicyRejectsNewNativeTool(t *testing.T)
 	}
 }
 
+func TestValidateSelfImproveArchitecturePolicyRejectsMissingMCPMain(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "cmd", "picoclaw-mcp-ebay"), 0o755); err != nil {
+		t.Fatalf("MkdirAll error = %v", err)
+	}
+
+	err := validateSelfImproveArchitecturePolicy(root, []selfImproveChange{
+		{Status: "A", Path: "cmd/picoclaw-mcp-ebay/client.go", Committed: true},
+	})
+	if err == nil || !strings.Contains(err.Error(), "cmd/picoclaw-mcp-ebay/main.go (missing)") {
+		t.Fatalf("validateSelfImproveArchitecturePolicy error = %v", err)
+	}
+}
+
 func TestValidateSelfImproveArchitecturePolicyAllowsMCPEntryPoints(t *testing.T) {
 	t.Parallel()
 
-	err := validateSelfImproveArchitecturePolicy([]selfImproveChange{
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "cmd", "picoclaw-mcp-homeassistant"), 0o755); err != nil {
+		t.Fatalf("MkdirAll error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "cmd", "picoclaw-mcp-homeassistant", "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile error = %v", err)
+	}
+
+	err := validateSelfImproveArchitecturePolicy(root, []selfImproveChange{
 		{Status: "A", Path: "cmd/picoclaw-mcp-homeassistant/main.go", Committed: true},
 		{Status: "A", Path: "internal/homeassistant/client.go", Committed: true},
 		{Status: "M", Path: "pkg/tools/mcp_tool.go", Committed: true},
@@ -55,6 +79,35 @@ func TestParseStatusPorcelainChangesParsesRenamesAndUntracked(t *testing.T) {
 	}
 	if changes[1].OldPath != "old/path.go" || changes[1].Path != "cmd/picoclaw-mcp-homeassistant/main.go" {
 		t.Fatalf("unexpected second change: %+v", changes[1])
+	}
+}
+
+func TestSelfImproveStageablePathsRejectsSuspiciousFiles(t *testing.T) {
+	t.Parallel()
+
+	_, err := selfImproveStageablePaths([]selfImproveChange{
+		{Status: "??", Path: ".env"},
+		{Status: " M", Path: "pkg/agent/self_improve.go"},
+	})
+	if err == nil || !strings.Contains(err.Error(), ".env") {
+		t.Fatalf("selfImproveStageablePaths error = %v", err)
+	}
+}
+
+func TestSelfImproveStageablePathsIgnoresGeneratedTmpFiles(t *testing.T) {
+	t.Parallel()
+
+	paths, err := selfImproveStageablePaths([]selfImproveChange{
+		{Status: "??", Path: ".tmp/self-improve/cache/output"},
+		{Status: " M", Path: "pkg/agent/self_improve.go"},
+		{Status: "??", Path: "cmd/picoclaw-mcp-ebay/main.go"},
+	})
+	if err != nil {
+		t.Fatalf("selfImproveStageablePaths error = %v", err)
+	}
+	got := strings.Join(paths, ",")
+	if got != "cmd/picoclaw-mcp-ebay/main.go,pkg/agent/self_improve.go" {
+		t.Fatalf("selfImproveStageablePaths = %q", got)
 	}
 }
 

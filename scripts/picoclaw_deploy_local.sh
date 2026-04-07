@@ -6,6 +6,7 @@ TARGET_NAME="${TARGET_NAME:-default}"
 SERVICE_NAME="${SERVICE_NAME:-picoclaw.service}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:18790/ready}"
 HEALTH_FALLBACK_URL="${HEALTH_FALLBACK_URL:-http://127.0.0.1:18790/health}"
+ALLOW_HEALTH_FALLBACK="${ALLOW_HEALTH_FALLBACK:-false}"
 INSTALL_ROOT="${INSTALL_ROOT:-$HOME/.local/lib/picoclaw}"
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
 PICOCLAW_HOME="${PICOCLAW_HOME:-$HOME/.picoclaw}"
@@ -206,6 +207,13 @@ check_health() {
   curl --silent --show-error --fail --max-time 5 "$url" >/dev/null
 }
 
+health_fallback_allowed=0
+case "${ALLOW_HEALTH_FALLBACK,,}" in
+  1|true|yes|on)
+    health_fallback_allowed=1
+    ;;
+esac
+
 ok=0
 used_fallback=0
 for _ in $(seq 1 20); do
@@ -213,7 +221,7 @@ for _ in $(seq 1 20); do
     ok=1
     break
   fi
-  if check_health "$HEALTH_FALLBACK_URL"; then
+  if [[ "$health_fallback_allowed" -eq 1 ]] && check_health "$HEALTH_FALLBACK_URL"; then
     ok=1
     used_fallback=1
     break

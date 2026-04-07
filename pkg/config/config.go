@@ -592,12 +592,13 @@ type DevicesConfig struct {
 }
 
 type SelfImproveTargetConfig struct {
-	Enabled             bool   `json:"enabled"               env:"PICOCLAW_SELF_IMPROVE_TARGET_ENABLED"`
-	DeployBranch        string `json:"deploy_branch"         env:"PICOCLAW_SELF_IMPROVE_TARGET_DEPLOY_BRANCH"`
-	ServiceName         string `json:"service_name"          env:"PICOCLAW_SELF_IMPROVE_TARGET_SERVICE_NAME"`
-	HealthURL           string `json:"health_url,omitempty"  env:"PICOCLAW_SELF_IMPROVE_TARGET_HEALTH_URL"`
-	PollIntervalSeconds int    `json:"poll_interval_seconds" env:"PICOCLAW_SELF_IMPROVE_TARGET_POLL_INTERVAL_SECONDS"`
-	InstallRoot         string `json:"install_root,omitempty" env:"PICOCLAW_SELF_IMPROVE_TARGET_INSTALL_ROOT"`
+	Enabled             bool   `json:"enabled"                    env:"PICOCLAW_SELF_IMPROVE_TARGET_ENABLED"`
+	DeployBranch        string `json:"deploy_branch"              env:"PICOCLAW_SELF_IMPROVE_TARGET_DEPLOY_BRANCH"`
+	ServiceName         string `json:"service_name"               env:"PICOCLAW_SELF_IMPROVE_TARGET_SERVICE_NAME"`
+	HealthURL           string `json:"health_url,omitempty"       env:"PICOCLAW_SELF_IMPROVE_TARGET_HEALTH_URL"`
+	AllowHealthFallback bool   `json:"allow_health_fallback,omitempty" env:"PICOCLAW_SELF_IMPROVE_TARGET_ALLOW_HEALTH_FALLBACK"`
+	PollIntervalSeconds int    `json:"poll_interval_seconds"      env:"PICOCLAW_SELF_IMPROVE_TARGET_POLL_INTERVAL_SECONDS"`
+	InstallRoot         string `json:"install_root,omitempty"     env:"PICOCLAW_SELF_IMPROVE_TARGET_INSTALL_ROOT"`
 }
 
 type SelfImproveConfig struct {
