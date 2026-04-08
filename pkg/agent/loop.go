@@ -1463,6 +1463,13 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		}
 		if approvalMessage, approved := codexExecutionApprovalMessage(msg.Content); approved {
 			if !al.hasCodexApprovalPending(opts.SessionKey) {
+				history := agent.Sessions.GetHistory(opts.SessionKey)
+				latestPlan := latestAssistantMessage(history)
+				if codexExecutionApprovalLinePresent(latestPlan) {
+					al.setCodexApprovalState(opts.SessionKey, true, latestPlan)
+				}
+			}
+			if !al.hasCodexApprovalPending(opts.SessionKey) {
 				return "No codex plan is awaiting approval yet. Keep chatting in /codex until I ask you to reply `proceed`.", nil
 			}
 			response, err := al.startApprovedCodexRun(ctx, agent, &opts, approvalMessage)
@@ -3288,6 +3295,10 @@ func normalizeCodexPlanningReplyWithState(content string, approvalPending bool) 
 	return content, true, false
 }
 
+func codexExecutionApprovalLinePresent(content string) bool {
+	return strings.Contains(strings.TrimSpace(content), "Reply `proceed` to execute this plan.")
+}
+
 func injectWorkModePrompt(
 	messages []providers.Message,
 	workMode, workspace string,
@@ -4300,7 +4311,14 @@ func (al *AgentLoop) currentApprovedCodexPlan(sessionKey string, history []provi
 	}
 	runtime, ok := al.codexStore.SessionRuntime(sessionKey)
 	if !ok || !runtime.ApprovalPending {
-		return "", "", "", fmt.Errorf("No codex plan is awaiting approval yet. Keep chatting in /codex until I ask you to reply `proceed`.")
+		latestPlan := latestAssistantMessage(history)
+		if codexExecutionApprovalLinePresent(latestPlan) {
+			al.setCodexApprovalState(sessionKey, true, latestPlan)
+			runtime, ok = al.codexStore.SessionRuntime(sessionKey)
+		}
+		if !ok || !runtime.ApprovalPending {
+			return "", "", "", fmt.Errorf("No codex plan is awaiting approval yet. Keep chatting in /codex until I ask you to reply `proceed`.")
+		}
 	}
 
 	planText := strings.TrimSpace(runtime.PendingPlanText)
