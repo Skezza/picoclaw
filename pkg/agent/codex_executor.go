@@ -327,7 +327,8 @@ func (al *AgentLoop) startCodexRunFromDiscussion(
 	lines := []string{
 		fmt.Sprintf("%s %s.", prefix, run.ID),
 		fmt.Sprintf("Repo: %s", sessionRec.Slug),
-		fmt.Sprintf("Executor: %s", executorModel),
+		fmt.Sprintf("Executor profile: %s", executorModel),
+		fmt.Sprintf("Codex CLI model: %s", cliModel),
 		fmt.Sprintf("Task: %s", taskSummary),
 		fmt.Sprintf("Worktree: %s", worktree),
 		"Use /codex status or /codex tail to inspect progress.",
