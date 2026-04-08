@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -18,32 +19,32 @@ type CodexSessionInfo struct {
 
 // CodexPlannerStatusInfo describes the user-facing planner state for a repo-scoped codex session.
 type CodexPlannerStatusInfo struct {
-	Phase           string
-	Model           string
-	SessionID       string
-	RepoSlug        string
-	RepoPath        string
-	RepoURL         string
-	ApprovalPending bool
+	Phase     string
+	Model     string
+	SessionID string
+	RepoSlug  string
+	RepoPath  string
+	RepoURL   string
 }
 
 // CodexRunInfo describes a background codex execution run.
 type CodexRunInfo struct {
-	ID         string
-	SessionID  string
-	RepoSlug   string
-	RepoPath   string
-	RepoURL    string
-	Branch     string
-	Worktree   string
-	Model      string
-	Status     string
-	PID        int
-	ExitCode   int
-	Active     bool
-	StartedAt  time.Time
-	UpdatedAt  time.Time
-	FinishedAt time.Time
+	ID          string
+	SessionID   string
+	RepoSlug    string
+	RepoPath    string
+	RepoURL     string
+	Branch      string
+	Worktree    string
+	Model       string
+	TaskSummary string
+	Status      string
+	PID         int
+	ExitCode    int
+	Active      bool
+	StartedAt   time.Time
+	UpdatedAt   time.Time
+	FinishedAt  time.Time
 }
 
 // Runtime provides runtime dependencies to command handlers. It is constructed
@@ -76,20 +77,28 @@ type Runtime struct {
 	FindCodexModel           func() string
 	ListCodexDelegateTargets func() []string
 	ListCodexRepoTargets     func(limit int) ([]string, error)
+	CodexCaptureBrief        func(brief string) error
 	CodexNewSession          func(slug, source string) (*CodexSessionInfo, error)
 	CodexAttach              func(ref string) (*CodexSessionInfo, error)
 	CodexListSessions        func() []CodexSessionInfo
 	CodexListGlobalSessions  func() []CodexSessionInfo
 	CodexActive              func() (*CodexSessionInfo, bool)
 	CodexPlannerStatus       func() (*CodexPlannerStatusInfo, bool)
+	CodexExecute             func(ctx context.Context, brief string) (string, error)
 	CodexRunList             func() []CodexRunInfo
 	CodexRunStatus           func() (*CodexRunInfo, bool)
 	CodexRunTail             func(runID string, lines int) (string, error)
 	CodexRunStop             func() error
 	CodexStop                func() error
 
-	ListSelfImproveTargets func() []string
-	SelfImproveActivate    func() (*CodexSessionInfo, error)
-	SelfImproveStatus      func() (string, error)
-	SelfImproveShip        func(target string) (string, error)
+	RuntimeCaptureBrief func(brief string) error
+	RuntimeStatus       func() (string, error)
+	RuntimeExecute      func(ctx context.Context, brief string) (string, error)
+
+	ListSelfImproveTargets  func() []string
+	SelfImproveActivate     func() (*CodexSessionInfo, error)
+	SelfImproveCaptureBrief func(brief string) error
+	SelfImproveStatus       func() (string, error)
+	SelfImproveExecute      func(ctx context.Context, brief string) (string, error)
+	SelfImproveDeploy       func(target string) (string, error)
 }

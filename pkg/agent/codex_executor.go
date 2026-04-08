@@ -97,13 +97,7 @@ func (al *AgentLoop) codexPlannerStatusRuntimeInfo(sessionKey string) (*commands
 		return nil, false
 	}
 	runtime, _ := al.codexStore.SessionRuntime(sessionKey)
-	phase := "planning"
-	switch {
-	case runtime.DeployConfirmPending:
-		phase = "awaiting deploy approval"
-	case runtime.ApprovalPending:
-		phase = "awaiting approval"
-	}
+	phase := "discussion"
 	if active, ok := al.codexStore.ActiveRun(sessionKey); ok && active != nil {
 		switch strings.ToLower(strings.TrimSpace(active.Status)) {
 		case codexRunStatusQueued:
@@ -115,13 +109,12 @@ func (al *AgentLoop) codexPlannerStatusRuntimeInfo(sessionKey string) (*commands
 		}
 	}
 	info := &commands.CodexPlannerStatusInfo{
-		Phase:           phase,
-		Model:           strings.TrimSpace(runtime.PlannerModel),
-		SessionID:       sessionRec.ID,
-		RepoSlug:        sessionRec.Slug,
-		RepoPath:        sessionRec.RepoPath,
-		RepoURL:         sessionRec.RepoURL,
-		ApprovalPending: runtime.ApprovalPending,
+		Phase:     phase,
+		Model:     strings.TrimSpace(runtime.PlannerModel),
+		SessionID: sessionRec.ID,
+		RepoSlug:  sessionRec.Slug,
+		RepoPath:  sessionRec.RepoPath,
+		RepoURL:   sessionRec.RepoURL,
 	}
 	if info.Model == "" {
 		info.Model = strings.TrimSpace(al.findCodexPlannerModelName(al.GetConfig()))
@@ -167,21 +160,22 @@ func codexRunRecordToInfo(rec *codexRunRecord, active bool) commands.CodexRunInf
 		return commands.CodexRunInfo{}
 	}
 	return commands.CodexRunInfo{
-		ID:         rec.ID,
-		SessionID:  rec.SessionID,
-		RepoSlug:   rec.RepoSlug,
-		RepoPath:   rec.RepoPath,
-		RepoURL:    rec.RepoURL,
-		Branch:     rec.BranchName,
-		Worktree:   rec.WorktreePath,
-		Model:      rec.ExecutorModel,
-		Status:     rec.Status,
-		PID:        rec.PID,
-		ExitCode:   rec.ExitCode,
-		Active:     active,
-		StartedAt:  rec.StartedAt,
-		UpdatedAt:  rec.UpdatedAt,
-		FinishedAt: rec.FinishedAt,
+		ID:          rec.ID,
+		SessionID:   rec.SessionID,
+		RepoSlug:    rec.RepoSlug,
+		RepoPath:    rec.RepoPath,
+		RepoURL:     rec.RepoURL,
+		Branch:      rec.BranchName,
+		Worktree:    rec.WorktreePath,
+		Model:       rec.ExecutorModel,
+		TaskSummary: rec.TaskSummary,
+		Status:      rec.Status,
+		PID:         rec.PID,
+		ExitCode:    rec.ExitCode,
+		Active:      active,
+		StartedAt:   rec.StartedAt,
+		UpdatedAt:   rec.UpdatedAt,
+		FinishedAt:  rec.FinishedAt,
 	}
 }
 
@@ -214,27 +208,29 @@ func (al *AgentLoop) codexRunTail(sessionKey, runID string, lines int) (string, 
 	return tailFileLines(run.LogPath, lines)
 }
 
-func (al *AgentLoop) startApprovedCodexRun(
+func (al *AgentLoop) startCodexRunFromDiscussion(
 	_ context.Context,
 	agent *AgentInstance,
 	opts *processOptions,
-	userMessage string,
+	explicitBrief string,
+	selfImprove bool,
 ) (string, error) {
 	if al == nil || al.codexStore == nil {
 		return "", fmt.Errorf("codex runs are not initialized")
 	}
 	if agent == nil || opts == nil {
-		return "", fmt.Errorf("codex planner context is incomplete")
+		return "", fmt.Errorf("codex execution context is incomplete")
 	}
+
 	sessionRec, ok := al.codexStore.Active(opts.SessionKey)
 	if !ok || sessionRec == nil {
 		return "", fmt.Errorf("no active codex session in this chat")
 	}
-	runtime, _ := al.codexStore.SessionRuntime(opts.SessionKey)
-	if !runtime.ApprovalPending {
-		return "", fmt.Errorf("no codex plan is awaiting approval yet")
+	if active, ok := al.codexStore.ActiveRun(opts.SessionKey); ok && active != nil {
+		return "", fmt.Errorf("a codex run is already active in this chat (%s). Use /codex status or /codex stop first", active.ID)
 	}
 
+	runtime, _ := al.codexStore.SessionRuntime(opts.SessionKey)
 	plannerModel := strings.TrimSpace(runtime.PlannerModel)
 	if plannerModel == "" {
 		plannerModel = strings.TrimSpace(al.getSessionModelOverride(opts.SessionKey))
@@ -242,7 +238,6 @@ func (al *AgentLoop) startApprovedCodexRun(
 	if plannerModel == "" {
 		plannerModel = strings.TrimSpace(al.findCodexPlannerModelName(al.GetConfig()))
 	}
-
 	executorModel := al.resolveCodexExecutorModel(runtime)
 	if executorModel == "" {
 		return "", fmt.Errorf("no codex-cli model configured in model_list")
@@ -250,18 +245,16 @@ func (al *AgentLoop) startApprovedCodexRun(
 
 	history := agent.Sessions.GetHistory(opts.SessionKey)
 	summary := agent.Sessions.GetSummary(opts.SessionKey)
-	_, _, planText, err := al.currentApprovedCodexPlan(opts.SessionKey, history)
+	briefText, taskSummary, err := al.resolveCodexExecutionBrief(opts.SessionKey, history, explicitBrief)
 	if err != nil {
-		al.clearCodexApprovalPending(opts.SessionKey)
-		return err.Error(), nil
+		return "", err
 	}
 
 	run, err := al.codexStore.CreateRun(opts.SessionKey, codexRunCreateOptions{
 		PlannerModel:  plannerModel,
 		ExecutorModel: executorModel,
+		TaskSummary:   taskSummary,
 		Mode:          "autonomous",
-		PlanID:        runtime.PendingPlanID,
-		PlanHash:      runtime.PendingPlanHash,
 		InitiatedBy:   strings.TrimSpace(opts.SenderID),
 	})
 	if err != nil {
@@ -290,7 +283,7 @@ func (al *AgentLoop) startApprovedCodexRun(
 		return "", err
 	}
 
-	promptMessages := buildCodexExecutionPromptMessages(sessionRec, run, summary, history, planText, userMessage)
+	promptMessages := buildCodexDiscussionExecutionPromptMessages(sessionRec, run, summary, history, briefText)
 	prompt := providers.BuildCodexCLIPrompt(promptMessages, nil)
 
 	cliModel := resolveCodexCLIModelArg(al.GetConfig(), executorModel)
@@ -314,6 +307,8 @@ func (al *AgentLoop) startApprovedCodexRun(
 	_ = al.codexStore.UpdateSessionRuntime(opts.SessionKey, func(runtime *codexSessionRuntimeState) {
 		runtime.WorkMode = "codex-plan"
 		runtime.ApprovalPending = false
+		runtime.DeployConfirmPending = false
+		runtime.PendingBriefText = ""
 		runtime.PendingPlanID = ""
 		runtime.PendingPlanHash = ""
 		runtime.PendingPlanText = ""
@@ -325,14 +320,24 @@ func (al *AgentLoop) startApprovedCodexRun(
 
 	go al.waitForCodexRun(cmd, logFile, run.ID, opts.Channel, opts.ChatID)
 
-	return strings.Join([]string{
-		fmt.Sprintf("Codex run started: %s", run.ID),
+	prefix := "Starting Codex run"
+	if selfImprove {
+		prefix = "Starting self-improve run"
+	}
+	lines := []string{
+		fmt.Sprintf("%s %s.", prefix, run.ID),
 		fmt.Sprintf("Repo: %s", sessionRec.Slug),
-		fmt.Sprintf("Planner: %s", plannerModel),
 		fmt.Sprintf("Executor: %s", executorModel),
+		fmt.Sprintf("Task: %s", taskSummary),
 		fmt.Sprintf("Worktree: %s", worktree),
 		"Use /codex status or /codex tail to inspect progress.",
-	}, "\n"), nil
+	}
+	if selfImprove {
+		if host, err := os.Hostname(); err == nil && strings.TrimSpace(host) != "" {
+			lines = append([]string{fmt.Sprintf("Host: %s", strings.TrimSpace(host))}, lines...)
+		}
+	}
+	return strings.Join(lines, "\n"), nil
 }
 
 func (al *AgentLoop) waitForCodexRun(cmd *exec.Cmd, logFile *os.File, runID, channel, chatID string) {
@@ -360,95 +365,13 @@ func (al *AgentLoop) waitForCodexRun(cmd *exec.Cmd, logFile *os.File, runID, cha
 	}
 
 	if finished, ok := al.codexStore.GetRun(runID); ok && finished != nil {
-		if status == codexRunStatusSucceeded && isPicoClawRun(finished) {
-			_ = al.codexStore.UpdateSessionRuntime(finished.ScopeKey, func(runtime *codexSessionRuntimeState) {
-				runtime.DeployConfirmPending = true
-				runtime.LastRunID = finished.ID
-				runtime.ActiveRunID = ""
-			})
-		}
+		_ = al.codexStore.UpdateSessionRuntime(finished.ScopeKey, func(runtime *codexSessionRuntimeState) {
+			runtime.DeployConfirmPending = false
+			runtime.LastRunID = finished.ID
+			runtime.ActiveRunID = ""
+		})
 		al.sendCodexRunNotification(channel, chatID, finished)
 	}
-}
-
-func (al *AgentLoop) startApprovedPicoClawDeploy(scopeKey, channel, chatID string) (string, error) {
-	if al == nil || al.codexStore == nil {
-		return "", fmt.Errorf("codex runs are not initialized")
-	}
-	sessionRec, ok := al.codexStore.Active(scopeKey)
-	if !ok || sessionRec == nil {
-		return "", fmt.Errorf("no active codex session in this chat")
-	}
-	runtime, ok := al.codexStore.SessionRuntime(scopeKey)
-	if !ok || !runtime.DeployConfirmPending || strings.TrimSpace(runtime.LastRunID) == "" {
-		return "", fmt.Errorf("no PicoClaw deploy is awaiting confirmation")
-	}
-	baseRun, ok := al.codexStore.GetRun(runtime.LastRunID)
-	if !ok || baseRun == nil {
-		return "", fmt.Errorf("the last approved PicoClaw run could not be found")
-	}
-	if strings.TrimSpace(baseRun.WorktreePath) == "" {
-		return "", fmt.Errorf("the approved PicoClaw run does not have a worktree to deploy")
-	}
-
-	plannerModel := strings.TrimSpace(runtime.PlannerModel)
-	executorModel := "deploy-script"
-	run, err := al.codexStore.CreateRun(scopeKey, codexRunCreateOptions{
-		PlannerModel:  plannerModel,
-		ExecutorModel: executorModel,
-		Mode:          "deploy",
-		InitiatedBy:   "deploy-approval",
-	})
-	if err != nil {
-		return "", err
-	}
-
-	workspace := filepath.Dir(filepath.Dir(al.codexStore.stateFile))
-	logDir := filepath.Join(workspace, "logs", "codex")
-	if err := os.MkdirAll(logDir, 0o700); err != nil {
-		_ = al.codexStore.MarkRunFailed(run.ID, -1, err.Error())
-		return "", err
-	}
-	logPath := filepath.Join(logDir, run.ID+".log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		_ = al.codexStore.MarkRunFailed(run.ID, -1, err.Error())
-		return "", err
-	}
-
-	scriptPath := filepath.Join(workspace, "scripts", "picoclaw_deploy_local.sh")
-	cmd := exec.Command("bash", scriptPath)
-	cmd.Env = append(os.Environ(),
-		"SRC_DIR="+baseRun.WorktreePath,
-	)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		_ = logFile.Close()
-		_ = al.codexStore.MarkRunFailed(run.ID, -1, err.Error())
-		return "", fmt.Errorf("failed to start deploy run: %w", err)
-	}
-
-	if err := al.codexStore.MarkRunStarted(run.ID, cmd.Process.Pid, logPath); err != nil {
-		_ = killCodexProcess(cmd.Process.Pid)
-		_ = logFile.Close()
-		return "", err
-	}
-	_ = al.codexStore.UpdateSessionRuntime(scopeKey, func(runtime *codexSessionRuntimeState) {
-		runtime.DeployConfirmPending = false
-		runtime.WorkMode = "codex-plan"
-		runtime.ActiveRunID = run.ID
-		runtime.LastRunID = run.ID
-	})
-
-	go al.waitForCodexRun(cmd, logFile, run.ID, channel, chatID)
-
-	return strings.Join([]string{
-		fmt.Sprintf("PicoClaw deploy started: %s", run.ID),
-		fmt.Sprintf("Source worktree: %s", baseRun.WorktreePath),
-		"Use /codex status or /codex tail to inspect progress.",
-	}, "\n"), nil
 }
 
 func (al *AgentLoop) stopActiveCodexRun(scopeKey string) error {
@@ -477,38 +400,97 @@ func latestAssistantMessage(history []providers.Message) string {
 	return ""
 }
 
-func findApprovedCodexPlanInHistory(history []providers.Message, expectedHash string) string {
-	expectedHash = strings.TrimSpace(expectedHash)
-	if expectedHash == "" {
-		return ""
+func (al *AgentLoop) resolveCodexExecutionBrief(sessionKey string, history []providers.Message, explicitBrief string) (string, string, error) {
+	brief := strings.TrimSpace(explicitBrief)
+	if brief == "" {
+		brief = strings.TrimSpace(al.pendingCodexBrief(sessionKey))
 	}
-	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].Role != "assistant" {
-			continue
-		}
-		content := strings.TrimSpace(history[i].Content)
-		if content == "" {
-			continue
-		}
-		_, hash := codexPlanIdentity(content)
-		if hash != "" && strings.EqualFold(hash, expectedHash) {
-			return content
-		}
+
+	taskSummary := summarizeExecutionTask(brief)
+	discussion := recentDiscussionTranscript(history)
+	if brief == "" {
+		brief = discussion
 	}
-	return ""
+	if brief == "" {
+		return "", "", fmt.Errorf("there is no current task brief yet. Talk through the task first, or pass a task directly to /codex execute")
+	}
+	if taskSummary == "" {
+		taskSummary = summarizeExecutionTask(discussion)
+	}
+	if taskSummary == "" {
+		taskSummary = "recent discussion"
+	}
+
+	if discussion != "" && !strings.Contains(brief, discussion) {
+		brief = strings.TrimSpace(brief + "\n\nRecent discussion:\n" + discussion)
+	}
+	return brief, taskSummary, nil
 }
 
-func buildCodexExecutionPromptMessages(
+func recentDiscussionTranscript(history []providers.Message) string {
+	if len(history) == 0 {
+		return ""
+	}
+	selected := make([]providers.Message, 0, 10)
+	for i := len(history) - 1; i >= 0; i-- {
+		msg := history[i]
+		if strings.TrimSpace(msg.Content) == "" {
+			continue
+		}
+		selected = append(selected, msg)
+		if len(selected) >= 10 {
+			break
+		}
+	}
+	if len(selected) == 0 {
+		return ""
+	}
+	for i, j := 0, len(selected)-1; i < j; i, j = i+1, j-1 {
+		selected[i], selected[j] = selected[j], selected[i]
+	}
+
+	lines := make([]string, 0, len(selected))
+	for _, msg := range selected {
+		role := strings.Title(strings.TrimSpace(msg.Role))
+		if role == "" {
+			role = "Message"
+		}
+		lines = append(lines, role+": "+strings.TrimSpace(msg.Content))
+	}
+	return strings.Join(lines, "\n\n")
+}
+
+func summarizeExecutionTask(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	line := raw
+	if idx := strings.IndexByte(line, '\n'); idx >= 0 {
+		line = line[:idx]
+	}
+	line = strings.TrimSpace(line)
+	if strings.HasPrefix(strings.ToLower(line), "user: ") || strings.HasPrefix(strings.ToLower(line), "assistant: ") {
+		if idx := strings.Index(line, ":"); idx >= 0 && idx+1 < len(line) {
+			line = strings.TrimSpace(line[idx+1:])
+		}
+	}
+	if len(line) > 140 {
+		line = strings.TrimSpace(line[:137]) + "..."
+	}
+	return line
+}
+
+func buildCodexDiscussionExecutionPromptMessages(
 	sessionRec *codexSessionRecord,
 	run *codexRunRecord,
 	summary string,
 	history []providers.Message,
-	planText string,
-	userMessage string,
+	briefText string,
 ) []providers.Message {
 	systemLines := []string{
-		"You are the Codex executor for a managed Telegram /codex session.",
-		"Execute the approved plan inside the active repo worktree.",
+		"You are the Codex executor for a managed repository session.",
+		"Execute the current task brief inside the active repo worktree.",
 		"Make concrete progress autonomously and validate changes with focused commands where practical.",
 		"Do not deploy, restart services, or mutate system-wide state in this phase.",
 	}
@@ -544,15 +526,10 @@ func buildCodexExecutionPromptMessages(
 			Content: msg.Content,
 		})
 	}
-
-	approvalText := "The user explicitly approved the latest plan. Execute it now in the active repo worktree."
-	if strings.TrimSpace(planText) != "" {
-		approvalText += "\nApproved plan:\n" + strings.TrimSpace(planText)
-	}
-	if strings.TrimSpace(userMessage) != "" {
-		approvalText += "\nApproval message: " + strings.TrimSpace(userMessage)
-	}
-	msgs = append(msgs, providers.Message{Role: "user", Content: approvalText})
+	msgs = append(msgs, providers.Message{
+		Role:    "user",
+		Content: "The user explicitly requested execution using the execute command. Current task brief:\n" + strings.TrimSpace(briefText),
+	})
 	return msgs
 }
 
@@ -562,6 +539,9 @@ func (al *AgentLoop) sendCodexRunNotification(channel, chatID string, run *codex
 	}
 
 	text := fmt.Sprintf("Codex run %s finished with status: %s.", run.ID, run.Status)
+	if strings.TrimSpace(run.TaskSummary) != "" {
+		text += "\nTask: " + strings.TrimSpace(run.TaskSummary)
+	}
 	if strings.TrimSpace(run.LogPath) != "" {
 		if summary, err := tailFileLines(run.LogPath, 20); err == nil && strings.TrimSpace(summary) != "" {
 			if parsed, err := providers.ParseCodexCLIJSONLEvents(summary); err == nil && parsed != nil && strings.TrimSpace(parsed.Content) != "" {
@@ -575,10 +555,9 @@ func (al *AgentLoop) sendCodexRunNotification(channel, chatID string, run *codex
 		if cfg := al.GetConfig(); cfg != nil && cfg.SelfImprove.Enabled {
 			targets := al.selfImproveTargets(cfg)
 			if len(targets) > 0 {
-				text += "\nUse `/self-improve ship <target>` to publish this run and advance a target deploy branch."
+				text += "\nUse `/self-improve deploy <target>` to publish this run and advance a target deploy branch."
 			}
 		}
-		text += "\nReply `deploy` to apply and restart PicoClaw from this worktree."
 	}
 
 	pubCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
