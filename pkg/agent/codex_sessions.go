@@ -34,6 +34,7 @@ type codexSessionRecord struct {
 	WorkMode             string    `json:"work_mode,omitempty"`
 	ApprovalPending      bool      `json:"approval_pending,omitempty"`
 	DeployConfirmPending bool      `json:"deploy_confirm_pending,omitempty"`
+	PendingBriefText     string    `json:"pending_brief_text,omitempty"`
 	PendingPlanID        string    `json:"pending_plan_id,omitempty"`
 	PendingPlanHash      string    `json:"pending_plan_hash,omitempty"`
 	PendingPlanText      string    `json:"pending_plan_text,omitempty"`

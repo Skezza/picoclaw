@@ -30,6 +30,7 @@ type codexSessionRuntimeState struct {
 	WorkMode             string `json:"work_mode,omitempty"`
 	ApprovalPending      bool   `json:"approval_pending,omitempty"`
 	DeployConfirmPending bool   `json:"deploy_confirm_pending,omitempty"`
+	PendingBriefText     string `json:"pending_brief_text,omitempty"`
 	PendingPlanID        string `json:"pending_plan_id,omitempty"`
 	PendingPlanHash      string `json:"pending_plan_hash,omitempty"`
 	PendingPlanText      string `json:"pending_plan_text,omitempty"`
@@ -48,6 +49,7 @@ type codexRunRecord struct {
 	BranchName           string    `json:"branch_name"`
 	PlannerModel         string    `json:"planner_model,omitempty"`
 	ExecutorModel        string    `json:"executor_model,omitempty"`
+	TaskSummary          string    `json:"task_summary,omitempty"`
 	Mode                 string    `json:"mode,omitempty"`
 	Status               string    `json:"status"`
 	PID                  int       `json:"pid,omitempty"`
@@ -80,6 +82,7 @@ type codexRunSnapshot struct {
 type codexRunCreateOptions struct {
 	PlannerModel         string
 	ExecutorModel        string
+	TaskSummary          string
 	Mode                 string
 	PlanID               string
 	PlanHash             string
@@ -187,6 +190,7 @@ func (s *codexSessionStore) CreateRun(scopeKey string, opts codexRunCreateOption
 		BranchName:           branchName,
 		PlannerModel:         strings.TrimSpace(opts.PlannerModel),
 		ExecutorModel:        strings.TrimSpace(opts.ExecutorModel),
+		TaskSummary:          strings.TrimSpace(opts.TaskSummary),
 		Mode:                 strings.TrimSpace(opts.Mode),
 		Status:               codexRunStatusQueued,
 		PlanID:               strings.TrimSpace(opts.PlanID),
@@ -224,6 +228,7 @@ func (s *codexSessionStore) CreateRun(scopeKey string, opts codexRunCreateOption
 	sessionRec.WorkMode = "codex-plan"
 	sessionRec.ApprovalPending = false
 	sessionRec.DeployConfirmPending = opts.DeployConfirmPending
+	sessionRec.PendingBriefText = ""
 	sessionRec.PendingPlanID = rec.PlanID
 	sessionRec.PendingPlanHash = rec.PlanHash
 	sessionRec.LastRunID = rec.ID
@@ -859,6 +864,7 @@ func applySessionRuntimeLocked(rec *codexSessionRecord, runtime codexSessionRunt
 	rec.WorkMode = strings.TrimSpace(runtime.WorkMode)
 	rec.ApprovalPending = runtime.ApprovalPending
 	rec.DeployConfirmPending = runtime.DeployConfirmPending
+	rec.PendingBriefText = strings.TrimSpace(runtime.PendingBriefText)
 	rec.PendingPlanID = strings.TrimSpace(runtime.PendingPlanID)
 	rec.PendingPlanHash = strings.TrimSpace(runtime.PendingPlanHash)
 	rec.PendingPlanText = strings.TrimSpace(runtime.PendingPlanText)
@@ -876,6 +882,7 @@ func sessionRuntimeFromRecord(rec *codexSessionRecord) codexSessionRuntimeState 
 		WorkMode:             strings.TrimSpace(rec.WorkMode),
 		ApprovalPending:      rec.ApprovalPending,
 		DeployConfirmPending: rec.DeployConfirmPending,
+		PendingBriefText:     strings.TrimSpace(rec.PendingBriefText),
 		PendingPlanID:        strings.TrimSpace(rec.PendingPlanID),
 		PendingPlanHash:      strings.TrimSpace(rec.PendingPlanHash),
 		PendingPlanText:      strings.TrimSpace(rec.PendingPlanText),
