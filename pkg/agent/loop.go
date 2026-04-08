@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -62,6 +63,7 @@ type AgentLoop struct {
 	pendingModelOverrides    sync.Map
 	sessionModelOverrides    sync.Map
 	sessionWorkModeOverrides sync.Map
+	sessionRuntimeBriefs     sync.Map
 	sessionCodexApproval     sync.Map
 	mu                       sync.RWMutex
 
@@ -117,7 +119,6 @@ const (
 	metadataKeyReplyToMessage  = "reply_to_message_id"
 	metadataKeyParentPeerKind  = "parent_peer_kind"
 	metadataKeyParentPeerID    = "parent_peer_id"
-	codexApprovalReadyMarker   = "[CODEX_APPROVAL_READY]"
 )
 
 var codexPlanningAllowedToolNames = map[string]struct{}{
@@ -1452,31 +1453,10 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 	workMode := al.getSessionWorkMode(opts.SessionKey)
 	if isCodexPlanningMode(workMode) {
 		if _, approved := codexDeployApprovalMessage(msg.Content); approved {
-			if runtime, ok := al.codexStore.SessionRuntime(opts.SessionKey); !ok || !runtime.DeployConfirmPending {
-				return "No PicoClaw deploy is awaiting confirmation yet. Finish an approved PicoClaw run first.", nil
-			}
-			response, err := al.startApprovedPicoClawDeploy(opts.SessionKey, opts.Channel, opts.ChatID)
-			if err != nil {
-				return "", err
-			}
-			return response, nil
+			return "Deployment is now explicit. Use `/self-improve deploy <target>` to publish and deploy the latest successful self-improve run.", nil
 		}
-		if approvalMessage, approved := codexExecutionApprovalMessage(msg.Content); approved {
-			if !al.hasCodexApprovalPending(opts.SessionKey) {
-				history := agent.Sessions.GetHistory(opts.SessionKey)
-				latestPlan := latestAssistantMessage(history)
-				if codexExecutionApprovalLinePresent(latestPlan) {
-					al.setCodexApprovalState(opts.SessionKey, true, latestPlan)
-				}
-			}
-			if !al.hasCodexApprovalPending(opts.SessionKey) {
-				return "No codex plan is awaiting approval yet. Keep chatting in /codex until I ask you to reply `proceed`.", nil
-			}
-			response, err := al.startApprovedCodexRun(ctx, agent, &opts, approvalMessage)
-			if err != nil {
-				return "", err
-			}
-			return response, nil
+		if _, approved := codexExecutionApprovalMessage(msg.Content); approved {
+			return "Execution no longer uses `proceed`. Talk normally to define the task, then use `/codex execute` or `/self-improve execute` when you want me to start.", nil
 		}
 	}
 
@@ -2994,21 +2974,7 @@ turnLoop:
 			finalContent = ts.opts.DefaultResponse
 		}
 	}
-	if isCodexPlanningMode(workMode) {
-		hadApprovalPending := al.hasCodexApprovalPending(ts.sessionKey)
-		var approvalPending, preservePending bool
-		finalContent, approvalPending, preservePending = normalizeCodexPlanningReplyWithState(finalContent, hadApprovalPending)
-		switch {
-		case approvalPending:
-			al.setCodexApprovalState(ts.sessionKey, true, finalContent)
-		case preservePending:
-			// Keep the existing approved plan armed while answering follow-up questions.
-		default:
-			al.clearCodexApprovalPending(ts.sessionKey)
-		}
-	} else {
-		al.clearCodexApprovalPending(ts.sessionKey)
-	}
+	al.clearCodexApprovalPending(ts.sessionKey)
 
 	ts.setPhase(TurnPhaseFinalizing)
 	ts.setFinalContent(finalContent)
@@ -3178,34 +3144,18 @@ Active repo path: %s%s`, repoPath, extra))
 			}
 			extra += "\nGitHub repos available: " + strings.Join(repoTargets[:limit], ", ")
 		}
-		pendingExtra := ""
-		if approvalPending {
-			pendingExtra = `
+		return strings.TrimSpace(fmt.Sprintf(`## Codex Discussion Mode
+You are in a repo-scoped Codex discussion session.
 
-Pending-plan behavior:
-- A codex plan is already pending approval.
-- Treat the next user messages as follow-up discussion about that existing plan.
-- Answer follow-up questions directly instead of restating the full plan.
-- Do not ask for approval again unless the plan materially changes.
-- If the plan materially changes, restate the updated plan and end with the exact approval marker.`
-		}
-		return strings.TrimSpace(fmt.Sprintf(`## Codex Planning Mode
-You are in codex planning mode. Treat this as conversational pre-planning for a repository session.
-
-Planning-only behavior:
+Discussion behavior:
 - You may use read-only inspection tools in this mode to understand the repo or environment.
 - Allowed inspection includes reading files, listing directories, safe git inspection, GitHub inspection, and web lookups.
 - Do not make any repo changes, file edits, commits, pushes, deploys, restarts, or other mutating actions in this mode.
-- Ask clarifying questions, identify risks, and refine scope until the user approves execution.
-- Produce structured plans with concrete steps, validation checks, and rollback notes.
-- Keep all proposed paths within the repo workspace; avoid absolute system paths.
-- When the plan is complete and ready for approval, end your response with the exact standalone marker %s.
+- Help the user refine the task, identify risks, and explain the implementation approach in normal conversation.
+- If a useful plan emerges, present it naturally, but do not ask for approval markers or machine-checked trigger phrases.
+- The user starts execution explicitly with /codex execute or /self-improve execute.
 
-Execution handoff:
-- After you output the approval marker, the user can reply with a machine-checked approval phrase such as "proceed".
-- After that, switch to implementation with test/build/deploy evidence.
-
-Active repo path: %s%s%s`, codexApprovalReadyMarker, repoPath, extra, pendingExtra))
+Active repo path: %s%s`, repoPath, extra))
 	case "ops":
 		return strings.TrimSpace(fmt.Sprintf(`## Ops Mode
 You are in ops mode. The user wants the PicoClaw instance itself adjusted.
@@ -3260,43 +3210,6 @@ func normalizeCodexApprovalPhrase(raw string) string {
 		}
 	}
 	return b.String()
-}
-
-func codexApprovalReady(content string) bool {
-	content = strings.TrimSpace(content)
-	if content == "" {
-		return false
-	}
-	lines := strings.Split(content, "\n")
-	for _, line := range lines {
-		if strings.TrimSpace(line) == codexApprovalReadyMarker {
-			return true
-		}
-	}
-	return false
-}
-
-func normalizeCodexPlanningReply(content string) (string, bool) {
-	normalized, armed, _ := normalizeCodexPlanningReplyWithState(content, false)
-	return normalized, armed
-}
-
-func normalizeCodexPlanningReplyWithState(content string, approvalPending bool) (string, bool, bool) {
-	armed := codexApprovalReady(content)
-	content = strings.ReplaceAll(content, codexApprovalReadyMarker, "")
-	content = strings.TrimSpace(content)
-	if !armed {
-		return content, false, approvalPending && content != ""
-	}
-	if content == "" {
-		content = "Plan is ready."
-	}
-	content += "\n\nReply `proceed` to execute this plan."
-	return content, true, false
-}
-
-func codexExecutionApprovalLinePresent(content string) bool {
-	return strings.Contains(strings.TrimSpace(content), "Reply `proceed` to execute this plan.")
 }
 
 func injectWorkModePrompt(
@@ -3885,6 +3798,12 @@ func (al *AgentLoop) buildCommandsRuntime(agent *AgentInstance, opts *processOpt
 		rt.ListCodexRepoTargets = func(limit int) ([]string, error) {
 			return al.codexGitHubRepos(limit)
 		}
+		rt.CodexCaptureBrief = func(brief string) error {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return fmt.Errorf("codex sessions unavailable in current context")
+			}
+			return al.setPendingCodexBrief(opts.SessionKey, brief)
+		}
 		rt.CodexNewSession = func(slug, source string) (*commands.CodexSessionInfo, error) {
 			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
 				return nil, fmt.Errorf("codex sessions unavailable in current context")
@@ -4002,6 +3921,12 @@ func (al *AgentLoop) buildCommandsRuntime(agent *AgentInstance, opts *processOpt
 			}
 			return al.codexPlannerStatusRuntimeInfo(opts.SessionKey)
 		}
+		rt.CodexExecute = func(ctx context.Context, brief string) (string, error) {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return "", fmt.Errorf("codex runs unavailable in current context")
+			}
+			return al.startCodexRunFromDiscussion(ctx, agent, opts, strings.TrimSpace(brief), false)
+		}
 		rt.CodexRunList = func() []commands.CodexRunInfo {
 			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
 				return nil
@@ -4053,6 +3978,51 @@ func (al *AgentLoop) buildCommandsRuntime(agent *AgentInstance, opts *processOpt
 			al.clearPendingModelOverride(opts.SessionKey)
 			return nil
 		}
+		rt.RuntimeCaptureBrief = func(brief string) error {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return fmt.Errorf("runtime operations unavailable in current context")
+			}
+			al.setPendingRuntimeBrief(opts.SessionKey, brief)
+			return nil
+		}
+		rt.RuntimeStatus = func() (string, error) {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return "", fmt.Errorf("runtime operations unavailable in current context")
+			}
+			host := ""
+			if h, err := os.Hostname(); err == nil {
+				host = strings.TrimSpace(h)
+			}
+			lines := []string{"Runtime operations are available for host-local config and service tasks."}
+			if host != "" {
+				lines = append(lines, "Host: "+host)
+			}
+			if brief := al.pendingRuntimeBrief(opts.SessionKey); brief != "" {
+				lines = append(lines, "Captured brief: "+summarizeExecutionTask(brief))
+			}
+			lines = append(lines, "Runtime execution is intentionally separate from `/self-improve` so host-local changes do not become deployable repo runs.")
+			return strings.Join(lines, "\n"), nil
+		}
+		rt.RuntimeExecute = func(ctx context.Context, brief string) (string, error) {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return "", fmt.Errorf("runtime operations unavailable in current context")
+			}
+			if strings.TrimSpace(brief) != "" {
+				al.setPendingRuntimeBrief(opts.SessionKey, brief)
+			}
+			brief = strings.TrimSpace(brief)
+			if brief == "" {
+				brief = al.pendingRuntimeBrief(opts.SessionKey)
+			}
+			if brief == "" {
+				return "", fmt.Errorf("there is no current runtime task brief yet. Talk through the task first, or pass a task directly to /runtime execute")
+			}
+			return strings.Join([]string{
+				"Runtime execution is not configured yet in this PicoClaw instance.",
+				"Captured task: " + summarizeExecutionTask(brief),
+				"Use `/self-improve execute` for repo changes, or wire a dedicated runtime executor before using `/runtime execute` for host-local mutations.",
+			}, "\n"), nil
+		}
 		rt.ListSelfImproveTargets = func() []string {
 			return al.selfImproveTargets(cfg)
 		}
@@ -4073,11 +4043,23 @@ func (al *AgentLoop) buildCommandsRuntime(agent *AgentInstance, opts *processOpt
 			}
 			return al.selfImproveStatus(opts.SessionKey, cfg, agent)
 		}
-		rt.SelfImproveShip = func(target string) (string, error) {
+		rt.SelfImproveCaptureBrief = func(brief string) error {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return fmt.Errorf("self-improve unavailable in current context")
+			}
+			return al.setPendingCodexBrief(opts.SessionKey, brief)
+		}
+		rt.SelfImproveExecute = func(ctx context.Context, brief string) (string, error) {
 			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
 				return "", fmt.Errorf("self-improve unavailable in current context")
 			}
-			return al.selfImproveShip(opts.SessionKey, cfg, agent, target)
+			return al.startCodexRunFromDiscussion(ctx, agent, opts, strings.TrimSpace(brief), true)
+		}
+		rt.SelfImproveDeploy = func(target string) (string, error) {
+			if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+				return "", fmt.Errorf("self-improve unavailable in current context")
+			}
+			return al.selfImproveDeploy(opts.SessionKey, cfg, agent, target)
 		}
 
 		rt.ClearHistory = func() error {
@@ -4257,6 +4239,75 @@ func (al *AgentLoop) clearSessionWorkMode(sessionKey string) {
 	}
 }
 
+func (al *AgentLoop) setPendingCodexBrief(sessionKey, brief string) error {
+	sessionKey = strings.TrimSpace(sessionKey)
+	brief = strings.TrimSpace(brief)
+	if sessionKey == "" {
+		return fmt.Errorf("codex session scope is required")
+	}
+	if al == nil || al.codexStore == nil {
+		return fmt.Errorf("codex sessions are not initialized")
+	}
+	return al.codexStore.UpdateSessionRuntime(sessionKey, func(runtime *codexSessionRuntimeState) {
+		runtime.PendingBriefText = brief
+	})
+}
+
+func (al *AgentLoop) pendingCodexBrief(sessionKey string) string {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" || al == nil || al.codexStore == nil {
+		return ""
+	}
+	if runtime, ok := al.codexStore.SessionRuntime(sessionKey); ok {
+		return strings.TrimSpace(runtime.PendingBriefText)
+	}
+	return ""
+}
+
+func (al *AgentLoop) clearPendingCodexBrief(sessionKey string) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" || al == nil || al.codexStore == nil {
+		return
+	}
+	_ = al.codexStore.UpdateSessionRuntime(sessionKey, func(runtime *codexSessionRuntimeState) {
+		runtime.PendingBriefText = ""
+	})
+}
+
+func (al *AgentLoop) setPendingRuntimeBrief(sessionKey, brief string) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	brief = strings.TrimSpace(brief)
+	if sessionKey == "" || al == nil {
+		return
+	}
+	if brief == "" {
+		al.sessionRuntimeBriefs.Delete(sessionKey)
+		return
+	}
+	al.sessionRuntimeBriefs.Store(sessionKey, brief)
+}
+
+func (al *AgentLoop) pendingRuntimeBrief(sessionKey string) string {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" || al == nil {
+		return ""
+	}
+	value, ok := al.sessionRuntimeBriefs.Load(sessionKey)
+	if !ok {
+		return ""
+	}
+	brief, _ := value.(string)
+	return strings.TrimSpace(brief)
+}
+
+func (al *AgentLoop) clearPendingRuntimeBrief(sessionKey string) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" || al == nil {
+		return
+	}
+	al.sessionRuntimeBriefs.Delete(sessionKey)
+}
+
 func (al *AgentLoop) setCodexApprovalPending(sessionKey string, pending bool) {
 	sessionKey = strings.TrimSpace(sessionKey)
 	if sessionKey == "" {
@@ -4304,44 +4355,6 @@ func (al *AgentLoop) setCodexApprovalState(sessionKey string, pending bool, plan
 	}
 }
 
-func (al *AgentLoop) currentApprovedCodexPlan(sessionKey string, history []providers.Message) (string, string, string, error) {
-	sessionKey = strings.TrimSpace(sessionKey)
-	if sessionKey == "" || al == nil || al.codexStore == nil {
-		return "", "", "", fmt.Errorf("The pending codex plan could not be verified. Ask me to restate the plan, then reply `proceed` again.")
-	}
-	runtime, ok := al.codexStore.SessionRuntime(sessionKey)
-	if !ok || !runtime.ApprovalPending {
-		latestPlan := latestAssistantMessage(history)
-		if codexExecutionApprovalLinePresent(latestPlan) {
-			al.setCodexApprovalState(sessionKey, true, latestPlan)
-			runtime, ok = al.codexStore.SessionRuntime(sessionKey)
-		}
-		if !ok || !runtime.ApprovalPending {
-			return "", "", "", fmt.Errorf("No codex plan is awaiting approval yet. Keep chatting in /codex until I ask you to reply `proceed`.")
-		}
-	}
-
-	planText := strings.TrimSpace(runtime.PendingPlanText)
-	if planText == "" {
-		planText = findApprovedCodexPlanInHistory(history, runtime.PendingPlanHash)
-	}
-	if strings.TrimSpace(planText) == "" {
-		latestPlan := latestAssistantMessage(history)
-		if strings.TrimSpace(latestPlan) != "" {
-			if _, latestHash := codexPlanIdentity(latestPlan); latestHash != "" && strings.TrimSpace(runtime.PendingPlanHash) != "" && !strings.EqualFold(strings.TrimSpace(runtime.PendingPlanHash), latestHash) {
-				return "", "", "", fmt.Errorf("The pending codex plan no longer matches the latest planner reply. Review the latest plan and reply `proceed` again.")
-			}
-		}
-		return "", "", "", fmt.Errorf("The pending codex plan could not be verified. Ask me to restate the plan, then reply `proceed` again.")
-	}
-
-	planID, planHash := codexPlanIdentity(planText)
-	if planHash == "" || strings.TrimSpace(runtime.PendingPlanHash) == "" || !strings.EqualFold(strings.TrimSpace(runtime.PendingPlanHash), planHash) {
-		return "", "", "", fmt.Errorf("The pending codex plan no longer matches the latest planner reply. Review the latest plan and reply `proceed` again.")
-	}
-
-	return planID, planHash, planText, nil
-}
 func (al *AgentLoop) hasCodexApprovalPending(sessionKey string) bool {
 	sessionKey = strings.TrimSpace(sessionKey)
 	if sessionKey == "" {

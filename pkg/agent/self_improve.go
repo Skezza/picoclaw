@@ -138,13 +138,21 @@ func (al *AgentLoop) selfImproveStatus(scopeKey string, cfg *config.Config, agen
 
 	lines := []string{
 		"Self-improve is configured.",
+	}
+	if host, err := os.Hostname(); err == nil && strings.TrimSpace(host) != "" {
+		lines = append(lines, fmt.Sprintf("Host: %s", strings.TrimSpace(host)))
+	}
+	lines = append(lines,
 		fmt.Sprintf("Repo: %s", strings.TrimSpace(cfg.SelfImprove.Repo)),
 		fmt.Sprintf("Session: %s", rec.ID),
 		fmt.Sprintf("Path: %s", rec.RepoPath),
-	}
+	)
 	targets := al.selfImproveTargets(cfg)
 	if len(targets) > 0 {
 		lines = append(lines, "Targets: "+strings.Join(targets, ", "))
+	}
+	if pendingBrief := strings.TrimSpace(al.pendingCodexBrief(scopeKey)); pendingBrief != "" {
+		lines = append(lines, "Captured brief: "+summarizeExecutionTask(pendingBrief))
 	}
 
 	runs := al.codexStore.ListRuns(scopeKey)
@@ -157,6 +165,9 @@ func (al *AgentLoop) selfImproveStatus(scopeKey string, cfg *config.Config, agen
 		fmt.Sprintf("Latest run: %s", run.ID),
 		fmt.Sprintf("Run status: %s", run.Status),
 	)
+	if strings.TrimSpace(run.TaskSummary) != "" {
+		lines = append(lines, fmt.Sprintf("Task: %s", strings.TrimSpace(run.TaskSummary)))
+	}
 	if strings.TrimSpace(run.PublishedBranch) != "" {
 		lines = append(lines, fmt.Sprintf("Published branch: %s", run.PublishedBranch))
 	}
@@ -164,18 +175,18 @@ func (al *AgentLoop) selfImproveStatus(scopeKey string, cfg *config.Config, agen
 		lines = append(lines, fmt.Sprintf("Published sha: %s", run.PublishedSHA))
 	}
 	if strings.TrimSpace(run.ShippedTarget) != "" {
-		lines = append(lines, fmt.Sprintf("Shipped target: %s", run.ShippedTarget))
+		lines = append(lines, fmt.Sprintf("Deployed target: %s", run.ShippedTarget))
 	}
 	if strings.TrimSpace(run.ShippedDeployBranch) != "" {
 		lines = append(lines, fmt.Sprintf("Deploy branch: %s", run.ShippedDeployBranch))
 	}
 	if strings.TrimSpace(run.ShippedSHA) != "" {
-		lines = append(lines, fmt.Sprintf("Shipped sha: %s", run.ShippedSHA))
+		lines = append(lines, fmt.Sprintf("Deployed sha: %s", run.ShippedSHA))
 	}
 	return strings.Join(lines, "\n"), nil
 }
 
-func (al *AgentLoop) selfImproveShip(scopeKey string, cfg *config.Config, agent *AgentInstance, targetName string) (string, error) {
+func (al *AgentLoop) selfImproveDeploy(scopeKey string, cfg *config.Config, agent *AgentInstance, targetName string) (string, error) {
 	if cfg == nil || !cfg.SelfImprove.Enabled {
 		return "", fmt.Errorf("self-improve is disabled")
 	}
@@ -253,7 +264,7 @@ func (al *AgentLoop) selfImproveShip(scopeKey string, cfg *config.Config, agent 
 	}
 
 	return strings.Join([]string{
-		fmt.Sprintf("Self-improve publish complete for target %s.", targetName),
+		fmt.Sprintf("Self-improve deployment branch update complete for target %s.", targetName),
 		fmt.Sprintf("Repo: %s", rec.Slug),
 		fmt.Sprintf("Run: %s", run.ID),
 		fmt.Sprintf("Published branch: %s", publishBranch),
@@ -270,7 +281,7 @@ func (al *AgentLoop) latestShippableSelfImproveRun(scopeKey string) (*codexRunRe
 			continue
 		}
 		if !strings.EqualFold(strings.TrimSpace(run.Status), codexRunStatusSucceeded) {
-			return nil, fmt.Errorf("latest self-improve run %s is %s; only the latest successful run can be shipped", run.ID, strings.TrimSpace(run.Status))
+			return nil, fmt.Errorf("latest self-improve run %s is %s; only the latest successful run can be deployed", run.ID, strings.TrimSpace(run.Status))
 		}
 		return &run, nil
 	}
@@ -534,7 +545,7 @@ func selfImproveStageablePaths(changes []selfImproveChange) ([]string, error) {
 	}
 	if len(blocked) > 0 {
 		sort.Strings(blocked)
-		return nil, fmt.Errorf("self-improve ship refused to publish suspicious working-tree paths: %s", strings.Join(blocked, ", "))
+		return nil, fmt.Errorf("self-improve deploy refused to publish suspicious working-tree paths: %s", strings.Join(blocked, ", "))
 	}
 	sort.Strings(paths)
 	return paths, nil
@@ -695,7 +706,7 @@ func validateSelfImproveArchitecturePolicy(worktree string, changes []selfImprov
 	}
 	sort.Strings(violations)
 	return fmt.Errorf(
-		"self-improve ship policy violation: new non-test files under pkg/tools are not allowed for external integrations (%s). External integrations must be MCPs with entrypoints under cmd/picoclaw-mcp-*",
+		"self-improve deploy policy violation: new non-test files under pkg/tools are not allowed for external integrations (%s). External integrations must be MCPs with entrypoints under cmd/picoclaw-mcp-*",
 		strings.Join(violations, ", "),
 	)
 }

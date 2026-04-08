@@ -22,51 +22,60 @@ func selfImproveCommand() Definition {
 			if err != nil {
 				return req.Reply(err.Error())
 			}
-			_, plannerModel, _ := codexPlannerState(rt)
-			return req.Reply(strings.Replace(
-				formatCodexActivatedMessage(info, plannerModel, codexExecutorModel(rt)),
-				"Codex session is active in planning mode.",
-				"Self-improve session is active in planning mode.",
-				1,
-			))
+			intent := tailFromToken(req.Text, 1)
+			if strings.TrimSpace(intent) != "" && rt != nil && rt.SelfImproveCaptureBrief != nil {
+				if err := rt.SelfImproveCaptureBrief(intent); err != nil {
+					return req.Reply(err.Error())
+				}
+			}
+			if rt == nil || rt.SelfImproveStatus == nil {
+				return req.Reply("Self-improve is not configured in this PicoClaw instance.")
+			}
+			status, err := rt.SelfImproveStatus()
+			if err != nil {
+				return req.Reply(err.Error())
+			}
+			if strings.TrimSpace(intent) == "" {
+				return req.Reply(status + "\nTalk normally to refine the task, then run `/self-improve execute` when you want me to start.")
+			}
+			lines := []string{
+				status,
+				"Captured brief: " + summarizeCodexTask(intent),
+				"Run `/self-improve execute` when you want me to start on it.",
+			}
+			_ = info
+			return req.Reply(strings.Join(lines, "\n"))
 		},
 		SubCommands: []SubCommand{
 			{
-				Name:        "plan",
-				Description: "Activate self-improve planning mode",
-				Handler: func(_ context.Context, req Request, rt *Runtime) error {
-					if _, err := activate(rt); err != nil {
-						return req.Reply(err.Error())
-					}
-					if rt.ClearCodexApprovalPending != nil {
-						rt.ClearCodexApprovalPending()
-					}
-					if rt.SetSessionWorkMode == nil {
-						return req.Reply(unavailableMsg)
-					}
-					if err := rt.SetSessionWorkMode("codex-plan"); err != nil {
-						return req.Reply(err.Error())
-					}
-					return req.Reply("Self-improve planning mode enabled. I will plan PicoClaw changes first, then ask you to reply `proceed` when the run is ready.")
-				},
-			},
-			{
 				Name:        "execute",
-				Description: "Arm self-improve execution in the configured self repo",
-				Handler: func(_ context.Context, req Request, rt *Runtime) error {
+				Description: "Launch a self-improve run from the recent chat brief",
+				ArgsUsage:   "[task override]",
+				Handler: func(ctx context.Context, req Request, rt *Runtime) error {
 					if _, err := activate(rt); err != nil {
 						return req.Reply(err.Error())
 					}
-					if rt.ClearCodexApprovalPending != nil {
-						rt.ClearCodexApprovalPending()
-					}
-					if rt.SetSessionWorkMode == nil {
+					if rt == nil || rt.SelfImproveExecute == nil {
 						return req.Reply(unavailableMsg)
 					}
-					if err := rt.SetSessionWorkMode("codex-plan"); err != nil {
+					brief := tailFromToken(req.Text, 2)
+					if strings.TrimSpace(brief) != "" && rt.SelfImproveCaptureBrief != nil {
+						if err := rt.SelfImproveCaptureBrief(brief); err != nil {
+							return req.Reply(err.Error())
+						}
+					}
+					effectiveBrief := strings.TrimSpace(brief)
+					if effectiveBrief == "" {
+						effectiveBrief = currentSelfImproveBrief(rt)
+					}
+					if looksLikeRuntimeTask(effectiveBrief) {
+						return req.Reply("That sounds like host-local runtime work rather than a repo change. Use `/runtime` to capture the task, then `/runtime execute` to run it.")
+					}
+					reply, err := rt.SelfImproveExecute(ctx, brief)
+					if err != nil {
 						return req.Reply(err.Error())
 					}
-					return req.Reply("Self-improve execution is armed. Keep planning in chat, then reply `proceed` when you want me to launch the approved PicoClaw run.")
+					return req.Reply(reply)
 				},
 			},
 			{
@@ -84,38 +93,72 @@ func selfImproveCommand() Definition {
 				},
 			},
 			{
-				Name:        "ship",
+				Name:        "deploy",
 				Description: "Publish the latest self-improve run and fast-forward a target deploy branch",
 				ArgsUsage:   "<target>",
 				Handler: func(_ context.Context, req Request, rt *Runtime) error {
-					if rt == nil || rt.SelfImproveShip == nil {
-						return req.Reply("Self-improve shipping is not configured in this PicoClaw instance.")
+					if rt == nil || rt.SelfImproveDeploy == nil {
+						return req.Reply("Self-improve deployment is not configured in this PicoClaw instance.")
 					}
 					target := strings.TrimSpace(nthToken(req.Text, 2))
 					if target == "" {
-						return req.Reply("Usage: /self-improve ship <target>")
+						return req.Reply("Usage: /self-improve deploy <target>")
 					}
-					result, err := rt.SelfImproveShip(target)
+					result, err := rt.SelfImproveDeploy(target)
 					if err != nil {
 						return req.Reply(err.Error())
 					}
 					return req.Reply(result)
 				},
 			},
-			{
-				Name:        "targets",
-				Description: "List configured self-improve deployment targets",
-				Handler: func(_ context.Context, req Request, rt *Runtime) error {
-					if rt == nil || rt.ListSelfImproveTargets == nil {
-						return req.Reply("Self-improve is not configured in this PicoClaw instance.")
-					}
-					targets := rt.ListSelfImproveTargets()
-					if len(targets) == 0 {
-						return req.Reply("No self-improve deploy targets are configured.")
-					}
-					return req.Reply("Self-improve targets:\n- " + strings.Join(targets, "\n- "))
-				},
-			},
 		},
 	}
+}
+
+func currentSelfImproveBrief(rt *Runtime) string {
+	if rt == nil || rt.SelfImproveStatus == nil {
+		return ""
+	}
+	status, err := rt.SelfImproveStatus()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(status, "\n") {
+		if strings.HasPrefix(line, "Captured brief: ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "Captured brief: "))
+		}
+	}
+	return ""
+}
+
+func looksLikeRuntimeTask(brief string) bool {
+	brief = strings.ToLower(strings.TrimSpace(brief))
+	if brief == "" {
+		return false
+	}
+	runtimeHints := []string{
+		"config.json",
+		".security",
+		"token",
+		"secret",
+		"env file",
+		"systemctl",
+		"docker",
+		"service ",
+		"restart ",
+		"enable ",
+		"disable ",
+		"install on this host",
+		"write to /home/",
+		"write to /mnt/",
+		"host-local",
+		"local runtime",
+		"home assistant token",
+	}
+	for _, hint := range runtimeHints {
+		if strings.Contains(brief, hint) {
+			return true
+		}
+	}
+	return false
 }

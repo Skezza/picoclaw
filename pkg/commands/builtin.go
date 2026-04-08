@@ -16,6 +16,7 @@ func BuiltinDefinitions() []Definition {
 		freeCommand(),
 		codeCommand(),
 		codexCommand(),
+		runtimeCommand(),
 		selfImproveCommand(),
 		defaultCommand(),
 		statusCommand(),
