@@ -839,6 +839,89 @@ func TestProcessMessage_CodexProceedUsesStoredApprovedPlanAfterFollowUp(t *testi
 	}
 }
 
+func TestProcessMessage_CodexProceedRecoversFromLatestApprovedPlanReply(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				ModelName:         "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+	msgBus := bus.NewMessageBus()
+	provider := &recordingProvider{}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	sessionKey := sessionKeyAgentPrefix + routing.DefaultAgentID + ":main"
+
+	repoPath := filepath.Join(tmpDir, "repos", "picoclaw")
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = repoPath
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s failed: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	run("git", "init", "-b", "main")
+	run("git", "config", "user.email", "test@example.com")
+	run("git", "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(repoPath, "README.md"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	run("git", "add", "README.md")
+	run("git", "commit", "-m", "init")
+
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	codexPath := filepath.Join(binDir, "codex")
+	codexStub := "#!/bin/sh\ncat >/dev/null\nsleep 1\nprintf '{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"agent_message\",\"text\":\"Run complete\"}}\\n'\nprintf '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}\\n'\n"
+	if err := os.WriteFile(codexPath, []byte(codexStub), 0o755); err != nil {
+		t.Fatalf("write codex stub: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if _, err := al.codexStore.CreateOrActivate(sessionKey, "picoclaw", ""); err != nil {
+		t.Fatalf("CreateOrActivate() error = %v", err)
+	}
+	approvedPlan := "Plan:\n- update the repo\n- run focused validation\n\nReply `proceed` to execute this plan."
+	if err := al.codexStore.SetSessionRuntime(sessionKey, codexSessionRuntimeState{
+		PlannerModel:  "test-model",
+		ExecutorModel: "codex-local",
+		WorkMode:      "codex-plan",
+	}); err != nil {
+		t.Fatalf("SetSessionRuntime() error = %v", err)
+	}
+	defaultAgent := al.GetRegistry().GetDefaultAgent()
+	defaultAgent.Sessions.AddMessage(sessionKey, "assistant", approvedPlan)
+	al.setSessionWorkMode(sessionKey, "codex-plan")
+	al.setSessionModelOverride(sessionKey, "test-model")
+
+	response, err := al.processMessage(context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "telegram:123",
+		ChatID:   "chat-1",
+		Content:  "proceed",
+	})
+	if err != nil {
+		t.Fatalf("processMessage() error = %v", err)
+	}
+	if !strings.Contains(response, "Codex run started:") {
+		t.Fatalf("response=%q, want run start message", response)
+	}
+	if runs := al.codexStore.ListRuns(sessionKey); len(runs) != 1 {
+		t.Fatalf("expected 1 codex run, got %d", len(runs))
+	}
+}
+
 func TestGetSessionWorkMode_FallsBackToCodexPlanForBoundSession(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := &config.Config{
