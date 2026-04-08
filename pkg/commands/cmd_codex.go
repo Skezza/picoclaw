@@ -3,7 +3,11 @@ package commands
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -577,21 +581,29 @@ func activateCodexSessionForConversationalEntry(rt *Runtime, intent string) (*Co
 	if rt == nil || rt.CodexActive == nil {
 		return nil, "", fmt.Errorf(unavailableMsg)
 	}
+	staleActiveNote := ""
 	if info, ok := rt.CodexActive(); ok && info != nil {
-		return info, "Using the already-active codex session for this chat.", nil
+		if codexRepoPathIsGitRepository(info.RepoPath) {
+			return info, "Using the already-active codex session for this chat.", nil
+		}
+		staleActiveNote = fmt.Sprintf("Ignored stale active codex session %s: repo path is not a git repository (%s).", info.Slug, info.RepoPath)
 	}
 
 	intent = strings.TrimSpace(intent)
 
 	if rt.CodexListSessions != nil && rt.CodexAttach != nil {
-		sessions := rt.CodexListSessions()
+		sessions := filterCodexSessionsWithGitRepos(rt.CodexListSessions())
 		if len(sessions) > 0 {
 			if matched, ambiguous := matchCodexSessionByIntent(intent, sessions); matched != nil {
 				info, err := rt.CodexAttach(matched.ID)
 				if err != nil {
 					return nil, "", err
 				}
-				return info, fmt.Sprintf("Matched existing project: %s.", matched.Slug), nil
+				note := fmt.Sprintf("Matched existing project: %s.", matched.Slug)
+				if staleActiveNote != "" {
+					note = staleActiveNote + " " + note
+				}
+				return info, note, nil
 			} else if len(ambiguous) > 0 {
 				return nil, "", fmt.Errorf("multiple codex projects matched (%s). Use /codex resume <repo-slug>.", strings.Join(ambiguous, ", "))
 			}
@@ -602,20 +614,28 @@ func activateCodexSessionForConversationalEntry(rt *Runtime, intent string) (*Co
 				if err != nil {
 					return nil, "", err
 				}
-				return info, fmt.Sprintf("Resumed this chat's most recent project: %s.", latest.Slug), nil
+				note := fmt.Sprintf("Resumed this chat's most recent project: %s.", latest.Slug)
+				if staleActiveNote != "" {
+					note = staleActiveNote + " " + note
+				}
+				return info, note, nil
 			}
 		}
 	}
 
 	if intent != "" && rt.CodexListGlobalSessions != nil && rt.CodexAttach != nil {
-		sessions := rt.CodexListGlobalSessions()
+		sessions := filterCodexSessionsWithGitRepos(rt.CodexListGlobalSessions())
 		if len(sessions) > 0 {
 			if matched, ambiguous := matchCodexSessionByIntent(intent, sessions); matched != nil {
 				info, err := rt.CodexAttach(matched.ID)
 				if err != nil {
 					return nil, "", err
 				}
-				return info, fmt.Sprintf("Matched existing project from your global codex history: %s.", matched.Slug), nil
+				note := fmt.Sprintf("Matched existing project from your global codex history: %s.", matched.Slug)
+				if staleActiveNote != "" {
+					note = staleActiveNote + " " + note
+				}
+				return info, note, nil
 			} else if len(ambiguous) > 0 {
 				return nil, "", fmt.Errorf("multiple codex projects matched (%s). Use /codex resume <repo-slug>.", strings.Join(ambiguous, ", "))
 			}
@@ -623,6 +643,9 @@ func activateCodexSessionForConversationalEntry(rt *Runtime, intent string) (*Co
 	}
 
 	if intent == "" || rt.ListCodexRepoTargets == nil || rt.CodexNewSession == nil {
+		if staleActiveNote != "" {
+			return nil, "", fmt.Errorf("%s Use /codex new owner/repo first.", staleActiveNote)
+		}
 		return nil, "", nil
 	}
 
@@ -634,6 +657,9 @@ func activateCodexSessionForConversationalEntry(rt *Runtime, intent string) (*Co
 	if matchedRepo == "" {
 		if len(ambiguousRepos) > 0 {
 			return nil, "", fmt.Errorf("multiple GitHub repos matched (%s). Use /codex new owner/repo.", strings.Join(ambiguousRepos, ", "))
+		}
+		if staleActiveNote != "" {
+			return nil, "", fmt.Errorf("%s I couldn’t infer a repo from your request. Use /codex new owner/repo first.", staleActiveNote)
 		}
 		return nil, "", nil
 	}
@@ -647,7 +673,42 @@ func activateCodexSessionForConversationalEntry(rt *Runtime, intent string) (*Co
 	if err != nil {
 		return nil, "", err
 	}
-	return info, fmt.Sprintf("Created new project from GitHub repo: %s.", matchedRepo), nil
+	note := fmt.Sprintf("Created new project from GitHub repo: %s.", matchedRepo)
+	if staleActiveNote != "" {
+		note = staleActiveNote + " " + note
+	}
+	return info, note, nil
+}
+
+func filterCodexSessionsWithGitRepos(sessions []CodexSessionInfo) []CodexSessionInfo {
+	if len(sessions) == 0 {
+		return nil
+	}
+	filtered := make([]CodexSessionInfo, 0, len(sessions))
+	for _, session := range sessions {
+		if codexRepoPathIsGitRepository(session.RepoPath) {
+			filtered = append(filtered, session)
+		}
+	}
+	return filtered
+}
+
+func codexRepoPathIsGitRepository(repoPath string) bool {
+	repoPath = strings.TrimSpace(repoPath)
+	if repoPath == "" {
+		return false
+	}
+	info, err := os.Stat(repoPath)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(repoPath, ".git")); err == nil {
+		return true
+	}
+	cmd := exec.Command("git", "-C", repoPath, "rev-parse", "--is-inside-work-tree")
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	return cmd.Run() == nil
 }
 
 func codexCommandTail(text string) string {
