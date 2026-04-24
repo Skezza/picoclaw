@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"math/rand"
+	"regexp"
 	"slices"
 	"time"
 
@@ -37,10 +38,18 @@ func commandRegistrationCleanupScopes() []telego.BotCommandScope {
 	}
 }
 
+var telegramCommandNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
+
 func buildBotCommands(defs []commands.Definition) []telego.BotCommand {
 	botCommands := make([]telego.BotCommand, 0, len(defs))
 	for _, def := range defs {
 		if def.Name == "" || def.Description == "" {
+			continue
+		}
+		if !telegramCommandNamePattern.MatchString(def.Name) {
+			logger.WarnCF("telegram", "Skipping invalid Telegram command definition", map[string]any{
+				"command": def.Name,
+			})
 			continue
 		}
 		botCommands = append(botCommands, telego.BotCommand{

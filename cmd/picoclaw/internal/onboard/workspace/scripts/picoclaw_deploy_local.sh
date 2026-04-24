@@ -4,7 +4,7 @@ set -euo pipefail
 PICO_HOME="${PICOCLAW_HOME:-/mnt/1tb/picoclaw-home}"
 WORK_ROOT="${WORK_ROOT:-$PICO_HOME/workspace}"
 ENV_FILE="${ENV_FILE:-$PICO_HOME/picoclaw.env}"
-LEGACY_SRC_DIR="${LEGACY_SRC_DIR:-/home/joe/agent/picoclaw-checkout}"
+LEGACY_SRC_DIR="${LEGACY_SRC_DIR:-/home/joe/Agents/picoclaw-checkout}"
 SRC_DIR="${SRC_DIR:-$WORK_ROOT/src/agent/picoclaw-checkout}"
 INSTALL_DIR="${INSTALL_DIR:-/home/joe/.local/lib/picoclaw/v0.2.5}"
 BIN_DIR="${BIN_DIR:-/home/joe/.local/bin}"

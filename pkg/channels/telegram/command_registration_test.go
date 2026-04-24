@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -68,6 +69,24 @@ func TestSyncTelegramCommands_ClearsCleanupScopesBeforeSetting(t *testing.T) {
 	}
 	if setCalls != 1 {
 		t.Fatalf("expected exactly one set call, got %d", setCalls)
+	}
+}
+
+func TestBuildBotCommands_SkipsTelegramInvalidNames(t *testing.T) {
+	defs := []commands.Definition{
+		{Name: "status", Description: "Show status"},
+		{Name: "self-improve", Description: "Invalid because Telegram commands cannot contain hyphens"},
+		{Name: "mcp_google_workspace_get_gmail_messages_content_batch", Description: "Invalid because Telegram commands are capped at 32 chars"},
+		{Name: "help2", Description: "Show help"},
+	}
+
+	got := buildBotCommands(defs)
+	want := []telego.BotCommand{
+		{Command: "status", Description: "Show status"},
+		{Command: "help2", Description: "Show help"},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("commands mismatch: got %+v want %+v", got, want)
 	}
 }
 
